@@ -160,7 +160,7 @@ class StickyTurnEndToEnd(unittest.TestCase):
         Edge.payloads = []
         jev.reset_turn_routes()
         tmp = self.enterContext(tempfile.TemporaryDirectory())
-        for name in ("OFF_PATH", "SHADOW_PATH", "DEBUG_PATH", "SIGNATURE_PATH",
+        for name in ("OFF_PATH", "SHADOW_PATH", "DEBUG_PATH", "SIGNATURE_OFF_PATH",
                      "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH"):
             self.enterContext(mock.patch.object(jev, name, os.path.join(tmp, name)))
         self.enterContext(mock.patch.object(jev, "STATE", tmp))

@@ -83,7 +83,7 @@ class TandemHandoff(unittest.TestCase):
         # Tests must not read the installed sentinels, write the live decision
         # log, or depend on the user's current fallback model configuration.
         tmp = self.enterContext(tempfile.TemporaryDirectory())
-        for name in ("OFF_PATH", "SHADOW_PATH", "DEBUG_PATH", "SIGNATURE_PATH",
+        for name in ("OFF_PATH", "SHADOW_PATH", "DEBUG_PATH", "SIGNATURE_OFF_PATH",
                      "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH"):
             self.enterContext(mock.patch.object(jev, name, os.path.join(tmp, name)))
         self.enterContext(mock.patch.object(jev, "STATE", tmp))
@@ -274,8 +274,6 @@ class TandemHandoff(unittest.TestCase):
         self.assertEqual(len(Edge.attempts), 2, "one try per tandem model, no loop")
 
     def test_header_covers_streaming_nonstreaming_and_strips_replayed_metadata(self):
-        with open(jev.SIGNATURE_PATH, "w"):
-            pass
         item = {"id": "msg", "type": "message", "role": "assistant",
                 "content": [{"type": "output_text", "text": "OK"}]}
         Edge.body = b"".join(("data: " + json.dumps(event) + "\n\n").encode() for event in [
@@ -301,6 +299,19 @@ class TandemHandoff(unittest.TestCase):
             else:
                 response = json.loads(body)
             self.assertEqual(response["output"][0]["content"][0]["text"], header + "OK")
+        with open(jev.SIGNATURE_OFF_PATH, "w"):
+            pass
+        for stream in (True, False):
+            status, body = self.call(stream=stream)
+            self.assertEqual(status, 200)
+            if stream:
+                events = [json.loads(line[6:]) for line in body.decode().splitlines()
+                          if line.startswith("data: ")]
+                response = events[-1]["response"]
+            else:
+                response = json.loads(body)
+            self.assertEqual(response["output"][0]["content"][0]["text"], "OK")
+        os.unlink(jev.SIGNATURE_OFF_PATH)
         # Shadow mode serves Astra while Jev proposes Luna; the header must
         # describe the actual response, not the hypothetical choice.
         with open(jev.SHADOW_PATH, "w"):

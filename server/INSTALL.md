@@ -25,6 +25,7 @@ Codex Router when using a non-default profile.
 | Action | Command |
 |---|---|
 | Decision log | `tail -f "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router-live.jsonl"` |
+| Model/thinking header | Shown above every assistant message by default; `touch "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router.signature.off"` to hide it, remove that file to restore it |
 | Kill switch (no Jev → frontier) | `touch "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router.off"`; remove file to re-enable |
 | Install macOS service | `bash server/install-service.sh` (your Terminal) |
 | Install Linux user service | `bash server/install-service-linux.sh` (no root; systemd user session required) |

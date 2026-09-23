@@ -95,9 +95,9 @@ CALLER_SECRET_PATH = os.path.join(STATE, "caller-secret")
 OFF_PATH = os.path.join(STATE, "jev-router.off")
 SHADOW_PATH = os.path.join(STATE, "jev-router.shadow")
 DEBUG_PATH = os.path.join(STATE, "jev-router.debug")
-# Opt-in route header on each assistant text message. Presentation metadata is
-# removed from replayed history, including legacy trailing signatures.
-SIGNATURE_PATH = os.path.join(STATE, "jev-router.signature")
+# Route headers are visible by default. This sentinel suppresses them without
+# affecting replay cleanup, which also removes legacy trailing signatures.
+SIGNATURE_OFF_PATH = os.path.join(STATE, "jev-router.signature.off")
 LOG_PATH = os.path.join(STATE, "jev-router-live.jsonl")
 LIFECYCLE_PATH = os.environ.get(
     "JEV_LIFECYCLE_LOG", os.path.join(STATE, "jev-router-lifecycle.jsonl")
@@ -765,8 +765,8 @@ def route_marker(model, effort):
 
 
 def answer_signature(shown):
-    """Leading model/thinking label for each assistant message, when enabled."""
-    if not os.path.exists(SIGNATURE_PATH):
+    """Leading model/thinking label for each assistant message, unless disabled."""
+    if os.path.exists(SIGNATURE_OFF_PATH):
         return None
     short, glyph = route_label(shown.get("model"))
     effort = shown.get("effort") or "non spécifié"

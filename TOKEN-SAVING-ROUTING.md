@@ -150,10 +150,10 @@ Jev 重新选择实际 model + effort
 
 ### 对话内标签
 
-启用以下标记文件后，每条用户消息后的可见回复会显示实际路由：
+默认在每条助手回复开头显示实际路由；不再需要创建旧的 `jev-router.signature` 文件。如需关闭，可创建以下标记文件，删除后恢复显示：
 
 ```text
-C:\Users\gxx_q\.codex\codex-router\jev-router.signature
+C:\Users\gxx_q\.codex\codex-router\jev-router.signature.off
 ```
 
 示例：

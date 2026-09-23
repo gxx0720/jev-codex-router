@@ -150,10 +150,11 @@ class AnswerHeader(unittest.TestCase):
         self.assertEqual(payload["input"][3]["content"][0]["text"], self.HEADER + "user text")
 
     def test_header_generation_uses_the_actual_route_and_handles_unknown_effort(self):
-        with mock.patch.object(jev.os.path, "exists", return_value=True):
+        with mock.patch.object(jev.os.path, "exists", return_value=False) as exists:
             self.assertEqual(jev.answer_signature({"model": jev.SOL, "effort": "low"}), self.HEADER)
             self.assertIn("thinking: non spécifié", jev.answer_signature({"model": jev.ASTRA}))
-        with mock.patch.object(jev.os.path, "exists", return_value=False):
+            exists.assert_called_with(jev.SIGNATURE_OFF_PATH)
+        with mock.patch.object(jev.os.path, "exists", return_value=True):
             self.assertIsNone(jev.answer_signature({"model": jev.LUNA, "effort": "low"}))
 
 

@@ -227,7 +227,7 @@ manual operation and troubleshooting see [server/INSTALL.md](server/INSTALL.md).
 |---|---|
 | Watch decisions | `tail -f "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router-live.jsonl"` |
 | See the picked model in the thread | every reasoning summary part carries the full model family tag, e.g. ` · 🧠 GPT-6 Sol:low · ` or ` · ⚡ GPT-6 Luna:low · ` |
-| Show the model and thinking above every assistant message | `touch ~/.codex/codex-router/jev-router.signature` — a leading `**🧠 GPT-6 Sol · thinking: high**` appears from the first text fragment, including commentary and unphased replies; remove the file to disable |
+| Show the model and thinking above every assistant message | On by default: a leading `**🧠 GPT-6 Sol · thinking: high**` appears from the first text fragment, including commentary and unphased replies. `touch ~/.codex/codex-router/jev-router.signature.off` to hide it; remove that file to show it again. The old `jev-router.signature` file is no longer needed. |
 | Shadow mode (decide + log, serve configured shadow route) | `touch ~/.codex/codex-router/jev-router.shadow` |
 | Debug capture (shapes + raw streams) | `touch ~/.codex/codex-router/jev-router.debug` |
 | Kill switch (no Jev → configured off route) | `touch ~/.codex/codex-router/jev-router.off` (delete the file to re-enable) |

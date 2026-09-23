@@ -196,8 +196,11 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 - **Thread display**: streamed reasoning summaries get the routed tag appended
   in place ( · 🧠sol:low · , separators on both sides so the next summary part
   never glues to the tag; one glyph per route — ⚡luna, 🧠sol, 🚀astra,
-  🐳deepseek/✨glm in tandem) — the picked model shows inside each call's thinking
-  block in the Codex thread.
+  🐳deepseek/✨glm in tandem). Each assistant text message also starts with the
+  actual model and thinking depth by default, including replies without a
+  reasoning summary. `touch ~/.codex/codex-router/jev-router.signature.off`
+  hides this header; remove the file to show it again. The former opt-in
+  `jev-router.signature` file is no longer needed.
 - **Shadow mode**: `touch ~/.codex/codex-router/jev-router.shadow` → decisions
   are logged (`would` field) while every call is still served by astra.
 - **Debug capture** (bounded): `touch ~/.codex/codex-router/jev-router.debug`
