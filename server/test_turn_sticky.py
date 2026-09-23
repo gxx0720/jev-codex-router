@@ -164,6 +164,8 @@ class StickyTurnEndToEnd(unittest.TestCase):
                      "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH"):
             self.enterContext(mock.patch.object(jev, name, os.path.join(tmp, name)))
         self.enterContext(mock.patch.object(jev, "STATE", tmp))
+        self.enterContext(mock.patch.object(jev, "read_weekly_remaining_percent",
+                                            return_value=100.0))
         self.records = []
         self.logged = threading.Event()
 

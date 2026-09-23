@@ -87,6 +87,7 @@ class TandemHandoff(unittest.TestCase):
                      "LOG_PATH", "DRY_STATE_PATH", "DRY_MANUAL_PATH"):
             self.enterContext(mock.patch.object(jev, name, os.path.join(tmp, name)))
         self.enterContext(mock.patch.object(jev, "STATE", tmp))
+        self.enterContext(mock.patch.object(jev, "CODEX_DRY_ENABLED", True))
         self.enterContext(mock.patch.object(jev, "GO_STANDARD", "fixture/standard"))
         self.enterContext(mock.patch.object(jev, "GO_FRONTIER", "fixture/frontier"))
         self.enterContext(mock.patch.object(jev, "GO_TANDEM",
@@ -147,7 +148,7 @@ class TandemHandoff(unittest.TestCase):
         return result
 
     def test_a_refused_tandem_call_is_retried_on_the_sibling(self):
-        Edge.refuse = (jev.GO_FRONTIER,)
+        Edge.refuse = (jev.GO_STANDARD,)
         canonical = [
             {"type": "message", "role": "user", "content": "Original evidence."},
             {"type": "function_call", "call_id": "xmesh", "name": "xmesh_inspect",
@@ -159,7 +160,7 @@ class TandemHandoff(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(
             [model for model, _effort in Edge.attempts],
-            [jev.GO_FRONTIER, jev.GO_STANDARD],
+            [jev.GO_STANDARD, jev.GO_FRONTIER],
         )
         self.assertEqual([payload["input"] for payload in Edge.payloads],
                          [canonical, canonical])
@@ -175,7 +176,7 @@ class TandemHandoff(unittest.TestCase):
         for tier, depth, client_speed in ((jev.LUNA, "low", "priority"),
                                          (jev.LUNA, "medium", "fast"),
                                          (jev.SOL, "high", "priority"),
-                                         (jev.ASTRA, "xhigh", "fast")):
+                                         (jev.SOL, "xhigh", "fast")):
             with self.subTest(tier=tier, depth=depth), mock.patch.object(
                 jev, "call_jev_routed", return_value={"answers": {
                     "route": {"choice": f"{tier}:{depth}", "confidence": 0.1},
@@ -230,12 +231,12 @@ class TandemHandoff(unittest.TestCase):
         jev.native_dry = lambda: None
         jev.load_key = lambda: "fixture-key"
         with mock.patch.object(jev, "call_jev_routed", return_value={"answers": {
-            "route": {"choice": f"{jev.ASTRA}:low", "confidence": 0.2},
+            "route": {"choice": f"{jev.SOL}:low", "confidence": 0.2},
         }}) as judge:
             status, body = self.call(input="You are creating a lossy continuation checkpoint")
         self.assertEqual(status, 200, body)
         judge.assert_called_once()
-        self.assertEqual(Edge.attempts[-1], (jev.ASTRA, "low"))
+        self.assertEqual(Edge.attempts[-1], (jev.SOL, "low"))
 
     def test_usage_is_logged_for_streaming_and_nonstreaming_calls(self):
         Edge.body = (
@@ -283,7 +284,7 @@ class TandemHandoff(unittest.TestCase):
             {"type": "response.completed",
              "response": {"id": "r", "status": "completed", "output": [item]}},
         ])
-        header = jev.answer_signature({"model": jev.GO_FRONTIER, "effort": "high"})
+        header = jev.answer_signature({"model": jev.GO_STANDARD, "effort": "high"})
         for stream in (True, False):
             status, body = self.call(stream=stream, input=[
                 {"role": "assistant", "content": header + "Previous reply"},
@@ -311,7 +312,7 @@ class TandemHandoff(unittest.TestCase):
         }}):
             status, body = self.call(reasoning={"effort": "high"})
         self.assertEqual(status, 200)
-        actual = jev.answer_signature({"model": jev.ASTRA, "effort": "high"})
+        actual = jev.answer_signature({"model": jev.SHADOW_MODEL, "effort": jev.SHADOW_EFFORT})
         self.assertEqual(json.loads(body)["output"][0]["content"][0]["text"], actual + "OK")
 
     def test_a_relayed_stream_repeats_the_id_it_opened_on(self):
@@ -346,7 +347,7 @@ class TandemHandoff(unittest.TestCase):
             try:
                 status, body = self.call()
                 self.assertEqual(status, 200, body)
-                self.assertEqual([model for model, _ in Edge.attempts], [jev.ASTRA])
+                self.assertEqual([model for model, _ in Edge.attempts], [jev.FALLBACK_MODEL])
                 self.assertFalse(os.path.exists(state), "the stale flip must be dropped")
             finally:
                 jev.native_dry, jev.DRY_STATE_PATH, jev.DRY_MANUAL_PATH = saved
@@ -364,11 +365,11 @@ class TandemHandoff(unittest.TestCase):
             jev.DRY_STATE_PATH = state
             jev.DRY_MANUAL_PATH = os.path.join(tmp, "flag")
             try:
-                Edge.refuse = (jev.ASTRA,)
+                Edge.refuse = (jev.FALLBACK_MODEL,)
                 Edge.reset_at = time.time() + 1800
                 status, body = self.call()
                 self.assertEqual(status, 200, body)
-                self.assertEqual([model for model, _ in Edge.attempts], [jev.ASTRA, jev.GO_FRONTIER])
+                self.assertEqual([model for model, _ in Edge.attempts], [jev.FALLBACK_MODEL, jev.GO_STANDARD])
                 with open(state, encoding="utf-8") as fh:
                     flipped = json.load(fh)
                 self.assertAlmostEqual(
