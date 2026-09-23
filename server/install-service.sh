@@ -5,7 +5,7 @@
 #
 #   bash <repo>/server/install-service.sh
 #
-set -e
+set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON="$(command -v /usr/local/bin/python3 || command -v python3)"
@@ -48,11 +48,25 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 # Stop the legacy label if it is loaded, but leave its plist untouched: it may
 # be user-managed and can be removed explicitly after the new service works.
 launchctl bootout "gui/$(id -u)/io.0xnatoshi.jev-router" 2>/dev/null || true
-sleep 1
+command -v lsof >/dev/null || { echo "lsof is required to check port 4319" >&2; exit 1; }
+for _attempt in 1 2 3 4 5; do
+  if ! lsof -nP -iTCP:4319 -sTCP:LISTEN -t >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+if lsof -nP -iTCP:4319 -sTCP:LISTEN -t >/dev/null; then
+  echo "Port 4319 is already in use after stopping the launchd job." >&2
+  echo "Stop the manually started Jev server (or inspect the listener) before installing." >&2
+  exit 1
+fi
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 sleep 1.5
-if curl -s -m 5 http://127.0.0.1:4319/health; then
-  echo ""
-  echo "— Jev Router service OK ($LABEL)"
+if ! HEALTH="$(curl -fsS -m 5 http://127.0.0.1:4319/health)" ||
+   ! "$PYTHON" -c 'import json, sys; body=json.loads(sys.argv[1]); sys.exit(0 if body.get("ok") is True and body.get("service") == "jev-router" else 1)' "$HEALTH"; then
+  echo "Jev Router service failed its health check (127.0.0.1:4319)." >&2
+  echo "Inspect $LOGDIR/jev-router.err.log and launchctl print gui/$(id -u)/$LABEL" >&2
+  exit 1
 fi
+echo "Jev Router service OK ($LABEL)"
 echo "Uninstall: launchctl bootout gui/\$(id -u)/$LABEL"

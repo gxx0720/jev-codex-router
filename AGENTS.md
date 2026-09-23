@@ -89,8 +89,8 @@ prerequisite, not installed by either project.
 ```bash
 cd <repo>
 python3 server/jev_server.py &            # long-lived; launchd service in step 6
-curl -s http://127.0.0.1:4319/health      # expect: {"ok": true, "service": "jev-router"}
-curl -s http://127.0.0.1:4319/v1/models   # expect: one model, id "auto"
+curl -fsS http://127.0.0.1:4319/health      # expect: {"ok": true, "service": "jev-router"}
+curl -fsS http://127.0.0.1:4319/v1/models   # expect: one model, id "auto"
 ```
 
 ### 2 — Register the local endpoint and model (router CLI)
@@ -134,7 +134,9 @@ codex debug models                        # confirm "jev/auto" is listed
 
 ### 5 — Persistent service (optional)
 
-Ask the user to run, in **their own Terminal**:
+Stop any manually started server from step 1 before installing the persistent
+service. The installer refuses to claim success while another process owns
+port 4319. Ask the user to run, in **their own Terminal**:
 
 ```bash
 bash <repo>/server/install-service.sh          # macOS launchd user service
@@ -151,21 +153,29 @@ user can select **Jev Codex Router**.
 
 ## End-to-end verification (must pass before declaring success)
 
+First run the read-only installation checks. They report the failing layer and
+do not make an inference request or print credentials:
+
 ```bash
-SEC=$(cat ~/.codex/codex-router/caller-secret | tr -d '\n')
-curl -s -N -m 120 -X POST "http://127.0.0.1:4202/_codex-router/$SEC/v1/responses" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"jev/auto","input":[{"role":"user","content":[{"type":"input_text","text":"Say OK"}]}],"stream":true}' | head -c 400
+python3 server/verify_install.py
 ```
 
-Expect an SSE stream: `data: {"type":"response.created",...,"model":"gpt-5.6-luna",…`
-(a trivial prompt routes to luna) ending with `response.completed` and
-`data: [DONE]`. Then:
+After the user accepts one real request that may consume quota/credits, run:
+
+```bash
+python3 server/verify_install.py --live
+```
+
+The verifier reads the caller secret from its protected local file, never puts
+it in a process argument or output, consumes the complete SSE stream, and
+requires `response.created`, a completed `response.completed`, and `[DONE]`.
+The served model is policy- and quota-dependent; do not assert a particular
+model. Inspect only non-private status fields of the local decision log:
 
 ```bash
 tail -1 ~/.codex/codex-router/jev-router-live.jsonl
-# expect one JSON line: gate=apply, tier, conf, depth, model, effort, speed,
-# jev_ms, total_ms, status=200, out=sse
+# expect one JSON line; check status=200 and out=sse, and inspect gate/model
+# locally without copying prompt excerpts elsewhere
 ```
 
 ## Operations
@@ -177,17 +187,13 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
   questions, caller state never logged). `502 jev: HTTP Error 402` means the
   TypeSafe account is out of credits; `503` means no key was found.
 - **Kill switch** (instant, no restart): `touch ~/.codex/codex-router/jev-router.off`
-  → the server relays to astra without calling Jev. Remove the file to re-enable.
-- **Codex-dry tandem** (only while native usage is exhausted):
-  `touch ~/.codex/codex-router/jev-router.codex-dry` → frontier-tier calls go to
-  `opencode-go/glm-5.3-flash`, every other tier to
-  `opencode-go/deepseek-v4.1-flash`; remove the file to return to the
-  luna/sol/astra triptych. An automatic flip (429 / usage-limit response) also
-  retries the failed call on the tandem, then lasts until the instant the edge
-  announced for the window reset (30 minutes when the refusal announces none,
-  one week at most) — `cat ~/.codex/codex-router/jev-router.codex-dry.json`
-  reads the reason and `until_iso` — and is cleared by the next successful
-  native call. Log fields to watch: `dry`, `native`, `retried`.
+  → the server relays to the configured off route (currently GPT-6 Sol at
+  medium) without calling Jev. Remove the file to re-enable.
+- **Codex-dry mode**: disabled by the active `routing-config.json`. The manual
+  `jev-router.codex-dry` flag and automatic 429 retry do nothing while disabled.
+  Do not promise an external fallback on native quota exhaustion. If the mode
+  is deliberately re-enabled, verify its configured targets first: current
+  source points both dry targets at `deepseek/deepseek-v4.1-flash`.
 - **Weekly quota guard**: `routing-config.json` defaults to a 1% weekly
   remaining threshold and forces `deepseek/deepseek-v4-flash-vision-exp:low`.
   Jev reads the seven-day window from Codex app-server before every model call;
@@ -195,19 +201,21 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
   `weekly_remaining_percent` and `weekly_quota_guard`.
 - **Thread display**: streamed reasoning summaries get the routed tag appended
   in place ( · 🧠sol:low · , separators on both sides so the next summary part
-  never glues to the tag; one glyph per route — ⚡luna, 🧠sol, 🚀astra,
-  🐳deepseek/✨glm in tandem). Each assistant text message also starts with the
+  never glues to the tag; one glyph per route — ⚡luna, 🧠sol,
+  🐳deepseek). Each assistant text message also starts with the
   actual model and thinking depth by default, including replies without a
   reasoning summary. `touch ~/.codex/codex-router/jev-router.signature.off`
   hides this header; remove the file to show it again. The former opt-in
   `jev-router.signature` file is no longer needed.
 - **Shadow mode**: `touch ~/.codex/codex-router/jev-router.shadow` → decisions
-  are logged (`would` field) while every call is still served by astra.
+  are logged (`would` field) while every call is still served by the configured
+  shadow route (currently GPT-6 Sol at medium).
 - **Debug capture** (bounded): `touch ~/.codex/codex-router/jev-router.debug`
   → request shapes in `jev-router-debug.jsonl` and raw response streams in
   `jev-router-debug-stream.log`. Remove the file to stop.
-- **Tune the policy**: the shared contract in `server/routing_policy.py`. Keep decisions
-  joint and evidence-based; restart the server after edits.
+- **Tune the policy**: `routing-config.json` selects the active routes and
+  switches; `server/routing_policy.py` implements the shared contract. Keep
+  decisions joint and evidence-based; restart the server after edits.
 - **Backtest**: `python3 poc/backtest_savings.py --days 7` (see BACKTEST.md).
 - **Disable**: `./bin/model-router codex providers disable jev` (keeps state);
   full rollback: also `./bin/model-router codex chatgpt-session disable` and stop the
@@ -221,8 +229,8 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 | `{"detail":"Stream must be set to true"}` | the caller edge streams only | send `"stream": true`; the bundled server forces it |
 | HTTP 502 `provider_api_proxy_error` on jev-auto | server-side error | check the `status`/`out` fields in `jev-router-live.jsonl`, and the server's stderr log |
 | "Jev Codex Router" absent from the picker | not published/visible, or Codex not restarted | `./bin/refresh-catalog`, `./bin/model-router codex providers`, full Codex restart |
-| Native 429 / "usage limit" while routing | ChatGPT usage window exhausted | expected: the Codex-dry tandem takes over (`jev-router.codex-dry.json`); delete the manual file to re-probe sooner |
-| Jev calls fail with `402 Payment Required` (`gate=codex_dry(fallback)`, `tier` null in the log) | the TypeSafe account is out of credits | expected: the router keeps serving through the tandem; add credits at console.typesafe.ai to restore classification |
+| Native 429 / "usage limit" while routing | ChatGPT usage window exhausted | the active policy has dry mode disabled; wait for quota reset or deliberately configure and test a fallback |
+| Jev calls fail with `402 Payment Required` | the TypeSafe account is out of credits | technical fail-open uses GPT-6 Sol at medium; add credits at console.typesafe.ai to restore classification |
 | `Unknown API gateway model: jev-auto` | catalog not republished | `./bin/refresh-catalog` |
 | Jev returns HTTP 422 | request body missing `"model"` | always send `"model": "jev-latest"` to the System One API |
 | Native calls fail after a few days | shared session expired | re-run `./bin/model-router codex chatgpt-session enable` |
@@ -230,15 +238,15 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 
 ## Latency & cost notes
 
-- The current policy is `joint-v1-standard`: Jev chooses one model/effort pair
+- The current policy is `gpt6-sol-luna-v1`: Jev chooses one model/effort pair
   per model call by default, including tool steps and post-compaction calls.
   Set `sticky_turn_enabled=true` only when one route per user turn is desired.
-  All tiers use adaptive effort and standard speed; never force
-  Luna to max or enable Fast mode.
+  The active pairs use adaptive effort and standard speed; Fast mode is not
+  forwarded.
 - No scenario overrides, target model shares, or confidence threshold may
   replace a valid Jev choice with Sol, Luna or Astra. Confidence is diagnostic.
-- Provider/schema failures remain distinct: Astra at medium, logged as a
-  technical fallback. Kill switch and exhausted-native-quota handling still apply.
+- Provider/schema failures remain distinct: GPT-6 Sol at medium, logged as a
+  technical fallback. The kill switch and weekly quota guard still apply.
 - Jev usage and upstream per-attempt tokens are logged when available. Run
   `python3 server/report_routing.py --days 7` for native-only credit estimates;
   unknown usage remains unknown and reasoning tokens are not counted twice.

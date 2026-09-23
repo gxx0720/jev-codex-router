@@ -21,12 +21,17 @@ router catalog is refreshed. For a direct CLI endpoint override, follow
 and preserve the protected caller secret; never put it in shell history or a
 project-level config. Set `CODEX_HOME` consistently for Codex, Jev, and the
 Codex Router when using a non-default profile.
+Stop a manually started `jev_server.py` before installing the macOS launchd
+service; the installer checks that port 4319 is free after stopping any prior
+managed job and will fail rather than mistake the manual process for its own.
 
 | Action | Command |
 |---|---|
+| Check installation without inference | `python3 server/verify_install.py` from the Jev repository |
+| Test the full route (one real request) | `python3 server/verify_install.py --live` (may consume quota/credits; prints no secrets or reply text) |
 | Decision log | `tail -f "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router-live.jsonl"` |
 | Model/thinking header | Shown above every assistant message by default; `touch "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router.signature.off"` to hide it, remove that file to restore it |
-| Kill switch (no Jev → frontier) | `touch "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router.off"`; remove file to re-enable |
+| Kill switch (no Jev → configured off route, currently GPT-6 Sol) | `touch "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router.off"`; remove file to re-enable |
 | Install macOS service | `bash server/install-service.sh` (your Terminal) |
 | Install Linux user service | `bash server/install-service-linux.sh` (no root; systemd user session required) |
 | macOS status/restart | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` / `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
@@ -53,7 +58,7 @@ touch them. Verify anyway:
   reason; make sure you run the current `jev_server.py`.
 - **401 / route refused by the edge**: the shared ChatGPT session expired —
   re-run `<router>/bin/model-router codex chatgpt-session enable`.
-- **Every turn routes to astra**: check the decision log (`gate` field) — the
+- **Every turn takes the configured fallback**: check the decision log (`gate` field) — the
   kill switch may be on, or the TypeSafe key is unreadable (look for
   `jev_error` / `no_key_or_task` gates).
 - **Model missing from the picker**: re-run `<router>/bin/refresh-catalog`,
