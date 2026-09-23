@@ -14,3 +14,8 @@ __pycache__/
 # Secrets / local env
 .env
 *.secret
+
+# Private operator notes, media and local runtime output
+.learnings/
+content/
+logs/

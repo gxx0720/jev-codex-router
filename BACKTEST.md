@@ -120,4 +120,4 @@ or observed account quota savings. The old USD backtest is labelled historical.
 Only aggregate figures are published. No prompts, file paths, project names,
 session identifiers, or per-turn routes appear in this document or the sample
 results file. Classification calls send a truncated prompt excerpt to Jev —
-the same thing the live router does per turn.
+the same thing the live router does per model call.

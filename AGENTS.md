@@ -8,9 +8,10 @@ verification step after each stage — they are what makes autonomy safe here.
 ## What you are installing
 
 A local server plus a Codex Router extension that adds one model to the Codex
-picker — **"Jev Codex Router"** (`jev/auto`). Every turn sent to it is classified by
+picker — **"Jev Codex Router"** (`jev/auto`). Normally every turn is classified by
 [Jev](https://docs.typesafe.ai) (TypeSafe System One) and served by the
-cheapest model that can handle it, at a thinking depth adapted to the task.
+selected model at a thinking depth adapted to the task. The weekly quota guard
+forces DeepSeek when 1% or less remains, or the weekly usage cannot be read.
 All traffic stays on loopback; the design is fail-open; there is a kill switch.
 
 ## Hard rules (never violate)
@@ -28,16 +29,16 @@ All traffic stays on loopback; the design is fail-open; there is a kill switch.
    the documented state files (`user-models.json`, `generic-providers.json`),
    and leave the artifacts to be regenerated.
 3. The server binds `127.0.0.1` only. Never expose it on another interface.
-4. If `launchctl` is restricted in your environment (supervised agents often),
-   skip the service install — use the watchdog pattern and let the user run
-   `server/install-service.sh` from their own Terminal instead. Never fight
-   the restriction.
+4. Service installation is user-scoped: `server/install-service.sh` on macOS,
+   `server/install-service-linux.sh` on Linux. If the service manager is
+   restricted in your environment, skip it and let the user run the matching
+   installer in their own terminal. Never fight the restriction.
 5. Treat prompt excerpts in local logs (`jev-router-live.jsonl`,
    `shadow-log.jsonl`) as private user data: read locally, never republish.
 
 ## Prerequisites (check, and report what you found)
 
-- **macOS** with **Codex** and a **Codex Router installation** (the local router
+- **macOS or Linux** with **Codex CLI** and a **Codex Router installation** (the local router
   that serves native GPT models to Codex on `127.0.0.1:4202`).
   Check: `<router checkout>/bin/codex-router status` → expect
   `{"state":"running"}`; `./bin/codex-router providers generic list` must exist.
@@ -123,7 +124,8 @@ cd <router checkout>
 Ask the user to run, in **their own Terminal**:
 
 ```bash
-bash <repo>/server/install-service.sh     # launchd service, keep-alive, logs in ~/Library/Logs
+bash <repo>/server/install-service.sh          # macOS launchd user service
+bash <repo>/server/install-service-linux.sh   # Linux systemd --user service
 ```
 
 Alternative (any scheduler, every 5 min): `<repo>/server/watchdog.sh` —
@@ -173,6 +175,11 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
   one week at most) — `cat ~/.codex/codex-router/jev-router.codex-dry.json`
   reads the reason and `until_iso` — and is cleared by the next successful
   native call. Log fields to watch: `dry`, `native`, `retried`.
+- **Weekly quota guard**: `routing-config.json` defaults to a 1% weekly
+  remaining threshold and forces `deepseek/deepseek-v4-flash-vision-exp:low`.
+  Jev reads the seven-day window from Codex app-server before every model call;
+  an unavailable reading also forces DeepSeek. The route log records
+  `weekly_remaining_percent` and `weekly_quota_guard`.
 - **Thread display**: streamed reasoning summaries get the routed tag appended
   in place ( · 🧠sol:low · , separators on both sides so the next summary part
   never glues to the tag; one glyph per route — ⚡luna, 🧠sol, 🚀astra,
@@ -203,14 +210,13 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 | `Unknown API gateway model: jev-auto` | catalog not republished | `./bin/codex-router refresh-catalog` |
 | Jev returns HTTP 422 | request body missing `"model"` | always send `"model": "jev-latest"` to the System One API |
 | Native calls fail after a few days | shared session expired | re-run `chatgpt-session enable` |
-| `launchctl` rejected inside a supervised agent | environment restriction | use the watchdog; let the user run `install-service.sh` |
+| Service manager rejected inside a supervised agent | environment restriction | use the watchdog; let the user run the OS-specific installer |
 
 ## Latency & cost notes
 
-- The current policy is `joint-v1-standard`: Jev chooses one of 15 model/effort
-  pairs **per turn** — the call that opens a turn (a user message) decides, and
-  every continuation of that turn (tool steps, retries, the call that follows a
-  mid-turn compaction) reuses that route. A new user ask opens the next turn.
+- The current policy is `joint-v1-standard`: Jev chooses one model/effort pair
+  per model call by default, including tool steps and post-compaction calls.
+  Set `sticky_turn_enabled=true` only when one route per user turn is desired.
   All tiers use adaptive effort and standard speed; never force
   Luna to max or enable Fast mode.
 - No scenario overrides, target model shares, or confidence threshold may

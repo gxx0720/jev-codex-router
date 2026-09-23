@@ -10,24 +10,19 @@ conversion: Responses in, Responses out, SSE relayed verbatim.
 Routing policy: Jev chooses one (model, thinking effort) pair for every call.
 Every pair uses standard speed. Confidence is logged without changing the chosen
 model. There are no keyword/scenario overrides or target model proportions.
-Technical Jev failures remain fail-open to astra @medium and are logged separately.
+Technical Jev failures use the configured fallback route and are logged separately.
 
-Turn-scoped sticky routing (v4): Jev decides once per turn, not once per call.
-The first call of a turn (a user message) opens it; every continuation of that
-turn — tool steps, retries, and the call that follows a mid-turn compaction —
-reuses that route instead of asking Jev again. A new user ask opens the next
-turn. A turn that opened on a technical Jev failure keeps that fail-open route
-for its continuations too, and the next turn probes Jev again. The compact Jev
-projection (task, signals, step digest) is judgment input only: the executing
-model always receives the caller's canonical request untouched, never that
-projection. Measured on live sessions: the previous
-per-call policy spent ~92% of its model calls on tool-steps, each one paying a
-decision that could change the route mid-turn.
+Routing cadence (v5): flexible per-call routing is the default, so user turns,
+tool steps, retries and post-compaction calls can each choose the model/effort
+pair that fits their current work. `sticky_turn_enabled` can opt into the older
+one-decision-per-turn behavior when continuity is preferred over step-level
+resource optimization. The compact Jev projection (task, signals, step digest)
+is judgment input only: the executing model always receives the caller's
+canonical request untouched, never that projection.
 
 Per-step awareness (v2): every request is classified as a fresh user turn, a
 tool-step continuation, or other, and a tool-step carries a digest of the last
-tool output and its tool name into the Jev state — the digest still only informs
-the decision that opens the turn.
+tool output and its tool name into the Jev state.
 
 Input handling (v3): Jev sees the current ask, never the thread — the task is
 Codex's last user text, with Codex's own machine-generated envelopes stripped
@@ -41,14 +36,14 @@ Live data (4 516 calls): 1 291 (29%) had sent Jev nothing but a
 only a `<recommended_plugins>` catalog — the head-clip stopped inside the
 envelope, so the user's actual request was never judged.
 
-Fail-open: any Jev error → astra @medium. Kill switch: file
-~/.codex/codex-router/jev-router.off → relay astra without a decision.
+Fail-open: any Jev error → configured fallback. Kill switch: file
+~/.codex/codex-router/jev-router.off → use configured off_route.
 Shadow: file ~/.codex/codex-router/jev-router.shadow → decide and log the
-route, but serve plain astra (quality-neutral data collection).
+route, but serve configured shadow_route (quality-neutral data collection).
 Debug: file ~/.codex/codex-router/jev-router.debug → dump request shapes
 (jev-router-debug.jsonl) and raw response streams (jev-router-debug-stream.log).
 Display: streamed reasoning summaries get the routed tag appended in place
-( · 🧠sol:low · ) so the Codex thread shows the picked model per call.
+( · 🧠 GPT-6 Sol:low · ) so the Codex thread shows the picked model family per call.
 The same rewriter keeps one response id across a relayed stream: a tandem stream
 has already crossed the local edge once, so its terminal event carries a
 re-encrypted id, and the Responses consumer in front of us refuses a completion
@@ -73,6 +68,7 @@ ladder (low/high/max): a low step stays low, medium and high become high, and
 xhigh or above become max.
 """
 import codecs
+import faulthandler
 import hashlib
 import http.client
 import json
@@ -83,11 +79,17 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
-                            TIERS, decision_from_answers, route)
+from routing_policy import (ASTRA, CODEX_DRY_ENABLED, EFFORTS, FALLBACK_EFFORT,
+                            FALLBACK_MODEL, LUNA, OFF_EFFORT, OFF_MODEL,
+                            POLICY_VERSION, QUESTIONS, SHADOW_EFFORT, SHADOW_MODEL,
+                            SOL, STICKY_TURN_ENABLED, TIERS, WEEKLY_QUOTA_GUARD,
+                            decision_from_answers, questions_for_multimodal, route,
+                            weekly_guard_active)
+from codex_weekly_usage import read_weekly_remaining_percent
+from jev_paths import codex_router_state_dir
 
 HOME = os.path.expanduser("~")
-STATE = os.path.join(HOME, ".codex", "codex-router")
+STATE = codex_router_state_dir(home=HOME)
 ENV_PATH = os.path.join(HOME, ".hermes", ".env")
 CALLER_SECRET_PATH = os.path.join(STATE, "caller-secret")
 OFF_PATH = os.path.join(STATE, "jev-router.off")
@@ -97,6 +99,10 @@ DEBUG_PATH = os.path.join(STATE, "jev-router.debug")
 # removed from replayed history, including legacy trailing signatures.
 SIGNATURE_PATH = os.path.join(STATE, "jev-router.signature")
 LOG_PATH = os.path.join(STATE, "jev-router-live.jsonl")
+LIFECYCLE_PATH = os.environ.get(
+    "JEV_LIFECYCLE_LOG", os.path.join(STATE, "jev-router-lifecycle.jsonl")
+)
+_lifecycle_lock = threading.Lock()
 
 # Turn-scoped routing: one decision opens a turn, its continuations reuse it.
 TURN_TTL = 1800.0          # a turn keeps its route for at most this long
@@ -109,7 +115,33 @@ LISTEN = ("127.0.0.1", 4319)
 ROUTER = ("127.0.0.1", 4202)
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.3"
+VERSION = "1.4"
+
+
+def lifecycle_event(event, **fields):
+    """Append process-only diagnostics without request bodies or credentials."""
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+        "pid": os.getpid(),
+    }
+    record.update(fields)
+    try:
+        directory = os.path.dirname(LIFECYCLE_PATH)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with _lifecycle_lock:
+            with open(LIFECYCLE_PATH, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fh.flush()
+    except OSError:
+        pass
+
+
+def heartbeat_loop(stop_event, interval=30.0):
+    """Leave a low-volume liveness trail until shutdown begins."""
+    while not stop_event.wait(interval):
+        lifecycle_event("heartbeat")
 
 API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -129,6 +161,8 @@ ASK_TYPES = ("noul", "choice", "score")
 GO_STANDARD = "deepseek/deepseek-v4.1-flash"
 GO_FRONTIER = "deepseek/deepseek-v4.1-flash"
 GO_TANDEM = (GO_STANDARD, GO_FRONTIER)
+WEEKLY_GUARD_MODEL = WEEKLY_QUOTA_GUARD["model"]
+WEEKLY_GUARD_EFFORT = WEEKLY_QUOTA_GUARD["effort"]
 # The tandem's own thinking ladder. Both Go models declare low/high/max where the
 # native triptych exposes low/medium/high/xhigh/max, so a depth keeps its meaning
 # by landing on the middle rung instead of collapsing onto the floor: Jev says
@@ -167,6 +201,9 @@ TERMINAL_EVENT_TYPES = ("response.completed", "response.incomplete", "response.f
 ERROR_RX = re.compile(
     r"(?i)(traceback|error|failed|exit code [1-9]|assertion|exception|fatal|panic)")
 DIGEST_CHARS = 520
+MULTIMODAL_TYPES = frozenset((
+    "input_image", "image_url", "input_audio", "input_video", "input_file",
+))
 
 # The task budget Jev was calibrated on (500 chars), spent as a head+tail window
 # so the tail survives: Codex puts its own blocks around the user's text, and the
@@ -285,6 +322,21 @@ def native_dry():
     if isinstance(state, dict) and float(state.get("until") or 0) > time.time():
         return str(state.get("reason") or "quota")
     return None
+
+
+def configured_route(kind):
+    routes = {
+        "fallback": (FALLBACK_MODEL, FALLBACK_EFFORT),
+        "off": (OFF_MODEL, OFF_EFFORT),
+        "shadow": (SHADOW_MODEL, SHADOW_EFFORT),
+    }
+    if kind not in routes:
+        raise ValueError(f"unknown configured route: {kind}")
+    return routes[kind]
+
+
+def configured_dry_reason():
+    return native_dry() if CODEX_DRY_ENABLED else None
 
 
 def mark_native_dry(reason, resets_at=None):
@@ -456,6 +508,7 @@ def extract(payload):
     last_user = last_assistant = ""
     n_items = 0
     has_image = False
+    has_multimodal = False
     tool_tail = False
     if isinstance(inp, str):
         last_user = inp
@@ -463,19 +516,27 @@ def extract(payload):
     elif isinstance(inp, list):
         n_items = len(inp)
         tail = inp[-6:]
-        for item in tail:
-            if isinstance(item, dict) and item.get("type") == "function_call_output":
-                tool_tail = True
-            if isinstance(item, dict) and isinstance(item.get("content"), list):
-                for part in item["content"]:
-                    if isinstance(part, dict) and part.get("type") in ("input_image", "image_url"):
-                        has_image = True
+        tool_tail = any(
+            isinstance(item, dict) and item.get("type") == "function_call_output"
+            for item in tail
+        )
+        for item in inp:
+            if isinstance(item, dict):
+                parts = item.get("content")
+                parts = parts if isinstance(parts, list) else [item]
+                for part in parts:
+                    if isinstance(part, dict) and part.get("type") in MULTIMODAL_TYPES:
+                        has_multimodal = True
+                        if part.get("type") in ("input_image", "image_url"):
+                            has_image = True
         for item in reversed(inp):
             if not isinstance(item, dict):
                 continue
             role = item.get("role")
             if role == "user" and not last_user:
-                last_user = _content_text(item.get("content"))
+                candidate = _content_text(item.get("content"))
+                if task_for_jev(candidate):
+                    last_user = candidate
             elif role == "assistant" and not last_assistant:
                 last_assistant = _content_text(item.get("content"))
             if last_user and last_assistant:
@@ -483,8 +544,22 @@ def extract(payload):
     return task_for_jev(last_user), last_assistant.strip(), {
         "n_items": n_items,
         "has_image": has_image,
+        "has_multimodal": has_multimodal,
         "tool_history": tool_tail,
     }
+
+
+def multimodal_guard_error(force_weekly_deepseek, signals):
+    """Preserve the user's no-GPT quota rule instead of sending media to DeepSeek."""
+    if force_weekly_deepseek and signals.get("has_multimodal"):
+        return (
+            "This request contains image, audio, video, or file input, but the "
+            "weekly quota guard is active and this router treats its DeepSeek "
+            "route as text-only. The request was stopped before provider forwarding "
+            "to preserve the no-GPT weekly-limit rule. Retry after the quota resets "
+            "or when the weekly usage reading is available and above the guard threshold."
+        )
+    return None
 
 
 def _output_text(output):
@@ -594,14 +669,13 @@ def _debug_shape(payload):
 
 
 ROUTE_GLYPHS = {
-    "gpt-5.6-luna": ("luna", "⚡"),      # cheap tier, adaptive thinking
-    "gpt-5.6-sol": ("sol", "🧠"),        # reasoning workhorse
-    "gpt-6-astra": ("astra", "🚀"),      # frontier
-    "gpt-5.6-terra": ("terra", "🌍"),
+    "gpt-6-luna": ("GPT-6 Luna", "⚡"),  # cost-efficient tier
+    "gpt-6-sol": ("GPT-6 Sol", "🧠"),    # coding and agentic workhorse
 }
 TANDEM_GLYPHS = {
-    "deepseek-v4.1-flash": ("deepseek", "🐳"),  # Go standard (native dry)
-    "glm-5.3-flash": ("glm", "✨"),             # Go frontier (native dry)
+    "deepseek-v4.1-flash": ("DeepSeek V4.1 Flash", "🐳"),
+    "deepseek-v4-flash-vision-exp": ("DeepSeek V4 Flash Vision Exp", "🐳"),
+    "glm-5.3-flash": ("GLM-5.3 Flash", "✨"),
 }
 
 
@@ -681,7 +755,7 @@ def route_label(model):
 
 
 def route_marker(model, effort):
-    """Visible tag for a routed call, separators on both sides: ' · 🧠sol:low · '.
+    """Visible tag for a routed call, e.g. ' · 🧠 GPT-6 Sol:low · '.
 
     The client concatenates reasoning summary parts with no separator, so the
     tag has to carry its own trailing one (" · ") or it glues to the next part.
@@ -702,10 +776,10 @@ def answer_signature(shown):
 # Only our exact presentation forms, at the boundaries of assistant text.
 # Retain the trailing form solely for old transcripts.
 HEADER_RX = re.compile(
-    r"\A\*\*(?:⚡|🧠|🚀|🌍|🐳|✨) [A-Za-z0-9._/-]+ · thinking: "
+    r"\A\*\*(?:⚡|🧠|🚀|🌍|🐳|✨) [A-Za-z0-9._/-]+(?: [A-Za-z0-9._/-]+)* · thinking: "
     r"(?:low|medium|high|xhigh|max|non spécifié)\*\*\r?\n\r?\n")
 SIGNATURE_RX = re.compile(
-    r"\s*\n*—\s+(?:⚡|🧠|🚀|🌍|🐳|✨)\s+[A-Za-z0-9._/-]+"
+    r"\s*\n*—\s+(?:⚡|🧠|🚀|🌍|🐳|✨)\s+[A-Za-z0-9._/-]+(?: [A-Za-z0-9._/-]+)*"
     r"(?:\s+·\s+(?:low|medium|high|xhigh|max))?\s*$")
 
 
@@ -735,6 +809,39 @@ def strip_signatures(payload):
             if cleaned != text:
                 block["text"] = cleaned
                 removed += 1
+    return removed
+
+
+TEXT_CONTENT_TYPES = frozenset(("input_text", "output_text", "text"))
+
+
+def strip_invalid_text_parts(payload):
+    """Drop malformed text blocks before relaying a Responses request.
+
+    The Responses API permits non-text content (for example input images and
+    files), but a block explicitly typed as text must carry a string `text`
+    value. Codex can retain an empty partial text block in replayed history;
+    forwarding it unchanged makes the whole next request fail validation.
+    """
+    items = payload.get("input")
+    if not isinstance(items, list):
+        return 0
+    removed = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        valid = []
+        for block in content:
+            if (isinstance(block, dict)
+                    and block.get("type") in TEXT_CONTENT_TYPES
+                    and not isinstance(block.get("text"), str)):
+                removed += 1
+                continue
+            valid.append(block)
+        item["content"] = valid
     return removed
 
 
@@ -1065,7 +1172,7 @@ def assemble_sse(raw):
     return None
 
 
-def log_line(record):
+def log_line(record, scope=None):
     try:
         with _log_lock:
             with open(LOG_PATH, "a", encoding="utf-8") as fh:
@@ -1172,34 +1279,71 @@ class Handler(BaseHTTPRequestHandler):
         # Our own answer signatures never travel back upstream (see
         # strip_signatures): the model must not read its own route tag.
         stripped = strip_signatures(payload)
+        invalid_text_parts = strip_invalid_text_parts(payload)
 
         t0 = time.time()
         debug = os.path.exists(DEBUG_PATH)
-        if debug:
-            try:
-                with open(os.path.join(STATE, "jev-router-debug.jsonl"), "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(
-                        {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "shape": _debug_shape(payload)},
-                        ensure_ascii=False) + "\n")
-            except OSError:
-                pass
         task, prev_assistant, signals = extract(payload)
         step = classify(payload)
         stream_requested = payload.get("stream") is True
+
+        weekly_remaining_percent = (
+            read_weekly_remaining_percent()
+            if WEEKLY_QUOTA_GUARD["enabled"] else None
+        )
+        force_weekly_deepseek = weekly_guard_active(
+            WEEKLY_QUOTA_GUARD, weekly_remaining_percent
+        )
+        media_error = multimodal_guard_error(force_weekly_deepseek, signals)
+        if media_error:
+            log_line({
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "event": "route_rejected",
+                "gate": "weekly_quota_guard:multimodal_unsupported",
+                "weekly_remaining_percent": weekly_remaining_percent,
+                "has_image": signals.get("has_image"),
+                "has_multimodal": True,
+                "policy_version": POLICY_VERSION,
+            })
+            return self._json(400, {"error": {
+                "type": "multimodal_unsupported_by_weekly_guard",
+                "message": media_error,
+            }})
 
         tier = depth = conf = None
         jev_ms = None
         decision = None
         jev_usage = None
         sticky = False
-        # One decision per turn: the first call opens the route, every
-        # continuation of the same turn reuses it (see turn_route_lookup).
+        # Sticky mode decides once per turn. Flexible mode (the default) skips
+        # this cache so every model call can be routed for its current step.
         scope = turn_scope(payload, task)
+        if debug:
+            try:
+                with open(os.path.join(STATE, "jev-router-debug.jsonl"), "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(
+                        {"at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                         "shape": _debug_shape(payload)},
+                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass
         n_items = signals.get("n_items") or 0
-        held = None if os.path.exists(OFF_PATH) else turn_route_lookup(
-            scope, task, step, n_items)
-        if os.path.exists(OFF_PATH):
-            model, effort, speed, gate = ASTRA, None, "default", "off"
+        held = None
+        if STICKY_TURN_ENABLED and not force_weekly_deepseek and not os.path.exists(OFF_PATH):
+            held = turn_route_lookup(scope, task, step, n_items)
+            if (held is not None and signals.get("has_multimodal")
+                    and "deepseek" in held["model"].lower()):
+                held = None
+        if force_weekly_deepseek:
+            model, effort = WEEKLY_GUARD_MODEL, WEEKLY_GUARD_EFFORT
+            speed, gate = "default", (
+                "weekly_quota_guard" if weekly_remaining_percent is not None
+                else "weekly_quota_guard:usage_unknown"
+            )
+            tier, depth = model, effort
+        elif os.path.exists(OFF_PATH):
+            model, effort = configured_route("off")
+            speed, gate = "default", "off"
         elif held is not None:
             sticky = True
             model, effort, speed = held["model"], held["effort"], held["speed"]
@@ -1212,8 +1356,15 @@ class Handler(BaseHTTPRequestHandler):
                 jt0 = time.time()
                 state = jev_state(task, prev_assistant, signals, step)
                 try:
-                    result = call_jev_routed(key, state)
-                    decision = decision_from_answers(result.get("answers"))
+                    questions = (questions_for_multimodal()
+                                 if signals.get("has_multimodal") else None)
+                    result = call_jev_routed(key, state, questions=questions)
+                    allowed_choices = (
+                        set(questions["route"]["criteria"]) if questions else None
+                    )
+                    decision = decision_from_answers(
+                        result.get("answers"), allowed_choices=allowed_choices
+                    )
                     raw_usage = result.get("usage") or {}
                     if not isinstance(raw_usage, dict):
                         raw_usage = {}
@@ -1224,29 +1375,44 @@ class Handler(BaseHTTPRequestHandler):
                                          decision["confidence"])
                     model, effort, speed, gate = route(tier, depth)
                 except Exception as exc:
-                    model, effort, speed, gate = ASTRA, "medium", "default", f"jev_error:{type(exc).__name__}"
+                    model, effort = configured_route("fallback")
+                    speed, gate = "default", f"jev_error:{type(exc).__name__}"
                 jev_ms = int((time.time() - jt0) * 1000)
             else:
-                model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
-            turn_route_remember(scope, task, {
-                "model": model, "effort": effort, "speed": speed, "gate": gate,
-                "tier": tier, "depth": depth, "conf": conf, "decision": decision,
-            }, n_items)
+                model, effort = configured_route("fallback")
+                speed, gate = "default", "no_key_or_task"
+            if STICKY_TURN_ENABLED:
+                turn_route_remember(scope, task, {
+                    "model": model, "effort": effort, "speed": speed, "gate": gate,
+                    "tier": tier, "depth": depth, "conf": conf, "decision": decision,
+                }, n_items)
 
         would = None
-        if os.path.exists(SHADOW_PATH):
+        if os.path.exists(SHADOW_PATH) and not force_weekly_deepseek:
             would = {"model": model, "effort": effort, "speed": speed, "gate": gate}
-            model, effort, speed, gate = ASTRA, None, "default", "shadow(astra)"
+            model, effort = configured_route("shadow")
+            speed, gate = "default", f"shadow({model})"
 
         # Codex-dry tandem: ONLY while native usage is exhausted (manual flag or
         # observed quota failure) the triptych is replaced — GLM for frontier
         # steps, deepseek for the rest. Otherwise luna/sol/astra run untouched.
-        dry_reason = native_dry()
+        dry_reason = configured_dry_reason()
         native_model = model
-        if dry_reason and model in TIERS:
+        if not force_weekly_deepseek and dry_reason and model in TIERS:
             model, effort = dry_target(native_model, effort)
             speed = "default"
             gate = f"codex_dry({dry_reason}):{native_model}"
+
+        # Defense in depth for configured off/shadow routes and sticky state.
+        # A media-bearing request must never reach a text-only DeepSeek route.
+        if signals.get("has_multimodal") and "deepseek" in model.lower():
+            if "deepseek" in FALLBACK_MODEL.lower():
+                return self._json(503, {"error": {
+                    "type": "no_multimodal_compatible_route",
+                    "message": "No non-DeepSeek fallback route is configured for media input.",
+                }})
+            model, effort = FALLBACK_MODEL, FALLBACK_EFFORT
+            speed, gate = "default", "multimodal_compatibility_fallback"
 
         # Display the model actually serving the request, including shadow and
         # operational fallbacks, rather than a hypothetical classification.
@@ -1275,7 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
             payload, out_path, stream_requested, debug, marker, model, signature)
         retried = False
         fallback = None
-        if quota_hit and not dry_reason:
+        if CODEX_DRY_ENABLED and quota_hit and not dry_reason and not force_weekly_deepseek:
             # Native usage is exhausted: flip to the Go tandem and retry this very
             # call so the turn does not fail (nothing reached the client yet). The
             # flip lasts until the edge says the window reopens, so the first call
@@ -1293,7 +1459,8 @@ class Handler(BaseHTTPRequestHandler):
             signature = answer_signature({"model": model, "effort": effort})
             status, out_kind, ctype, quota_hit, unwritten, _resets_at = self._forward(
                 payload, out_path, stream_requested, debug, marker, model, signature)
-        elif status == 200 and not dry_reason and model in TIERS and os.path.exists(DRY_STATE_PATH):
+        elif (status == 200 and not dry_reason and not force_weekly_deepseek
+              and model in TIERS and os.path.exists(DRY_STATE_PATH)):
             # Native answered again: drop the stale auto state (never the flag).
             clear_native_dry()
             dry_reason = "cleared"
@@ -1339,6 +1506,9 @@ class Handler(BaseHTTPRequestHandler):
             "native": native_model,
             "dry": dry_reason,
             "sticky": sticky,
+            "sticky_enabled": STICKY_TURN_ENABLED,
+            "weekly_remaining_percent": weekly_remaining_percent,
+            "weekly_quota_guard": force_weekly_deepseek,
             "retried": retried,
             "fallback": fallback,
             "jev_ms": jev_ms,
@@ -1349,10 +1519,12 @@ class Handler(BaseHTTPRequestHandler):
             "uctype": ctype,
             "n_items": signals.get("n_items"),
             "img": signals.get("has_image"),
+            "has_multimodal": signals.get("has_multimodal"),
             "step": step["step_type"],
             "errored": step["errored"],
             "digest_len": len(step["digest"]),
             "stripped": stripped,
+            "invalid_text_parts": invalid_text_parts,
             "would": would,
             "task": task[:110],
         })
@@ -1472,14 +1644,46 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = ThreadingHTTPServer(LISTEN, Handler)
-    server.daemon_threads = True
     try:
-        os.chmod(LOG_PATH, 0o600)
-    except OSError:
+        faulthandler.enable(all_threads=True)
+    except (OSError, RuntimeError):
         pass
-    print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
-    server.serve_forever()
+
+    lifecycle_event("process_start", version=VERSION, listen=f"{LISTEN[0]}:{LISTEN[1]}")
+    server = None
+    heartbeat = None
+    heartbeat_stop = threading.Event()
+    try:
+        server = ThreadingHTTPServer(LISTEN, Handler)
+        server.daemon_threads = True
+        try:
+            os.chmod(LOG_PATH, 0o600)
+        except OSError:
+            pass
+        lifecycle_event("server_ready")
+        heartbeat = threading.Thread(
+            target=heartbeat_loop,
+            args=(heartbeat_stop,),
+            name="jev-lifecycle-heartbeat",
+            daemon=True,
+        )
+        heartbeat.start()
+        print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
+        server.serve_forever()
+    except BaseException as exc:
+        lifecycle_event(
+            "process_exception",
+            exception_type=type(exc).__name__,
+            message=str(exc)[:500],
+        )
+        raise
+    finally:
+        heartbeat_stop.set()
+        if heartbeat is not None:
+            heartbeat.join(timeout=2.0)
+        if server is not None:
+            server.server_close()
+        lifecycle_event("process_stop")
 
 
 if __name__ == "__main__":

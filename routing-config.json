@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "policy_version": "gpt6-sol-luna-v1",
+  "routes": [
+    {
+      "model": "deepseek/deepseek-v4-flash-vision-exp",
+      "effort": "low"
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash-vision-exp",
+      "effort": "high"
+    },
+    { "model": "gpt-6-luna", "effort": "low" },
+    { "model": "gpt-6-luna", "effort": "medium" },
+    { "model": "gpt-6-luna", "effort": "high" },
+    { "model": "gpt-6-luna", "effort": "xhigh" },
+    { "model": "gpt-6-luna", "effort": "max" },
+    { "model": "gpt-6-sol", "effort": "low" },
+    { "model": "gpt-6-sol", "effort": "medium" },
+    { "model": "gpt-6-sol", "effort": "high" },
+    { "model": "gpt-6-sol", "effort": "xhigh" },
+    { "model": "gpt-6-sol", "effort": "max" }
+  ],
+  "fallback": {
+    "model": "gpt-6-sol",
+    "effort": "medium"
+  },
+  "off_route": {
+    "model": "gpt-6-sol",
+    "effort": "medium"
+  },
+  "shadow_route": {
+    "model": "gpt-6-sol",
+    "effort": "medium"
+  },
+  "codex_dry_enabled": false,
+  "sticky_turn_enabled": false,
+  "weekly_quota_guard": {
+    "enabled": true,
+    "remaining_percent_at_or_below": 1,
+    "model": "deepseek/deepseek-v4-flash-vision-exp",
+    "effort": "low"
+  }
+}

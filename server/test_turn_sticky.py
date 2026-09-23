@@ -1,12 +1,10 @@
-"""Turn-scoped sticky routing: one Jev decision per turn, reused by its continuations.
+"""Configurable routing cadence: flexible per-call by default, sticky when enabled.
 
 The contract this file pins, in the order the tests read:
 
-1. a decision is taken when a turn opens (a user message);
-2. every later call of that turn — tool steps, retries, the call that follows a
-   mid-turn compaction — keeps the route, and the turn's own long history never
-   triggers a re-decision;
-3. a new user ask opens the next turn;
+1. every model call gets a fresh decision by default;
+2. sticky mode can keep one route across tool steps and compaction;
+3. a new user ask always opens a new turn;
 4. the compact projection sent to Jev (task, signals, digest) never becomes the
    execution context: the edge receives the caller's canonical request.
 
@@ -211,7 +209,7 @@ class StickyTurnEndToEnd(unittest.TestCase):
 
     def test_a_whole_tool_turn_costs_one_decision_and_one_route(self):
         opening = [message("user", "run the tests and fix what breaks")]
-        with self.decide() as judge:
+        with mock.patch.object(jev, "STICKY_TURN_ENABLED", True), self.decide() as judge:
             self.call(payload_for(opening))
             seen = [("user", opening)]
             for index in range(3):
@@ -226,6 +224,19 @@ class StickyTurnEndToEnd(unittest.TestCase):
         self.assertEqual([r["sticky"] for r in self.records], [False, True, True, True])
         self.assertEqual(len(Edge.payloads), 4)
 
+    def test_default_routing_redecides_each_model_call(self):
+        opening = [message("user", "run the tests and fix what breaks")]
+        history = opening + [tool_call("c0"), tool_step("c0", "tests passed")]
+        decisions = [answer(jev.LUNA, "low"), answer(jev.SOL, "medium")]
+
+        with mock.patch.object(jev, "call_jev_routed", side_effect=decisions) as judge:
+            self.call(payload_for(opening))
+            self.call(payload_for(history))
+
+        self.assertEqual(judge.call_count, 2)
+        self.assertEqual([p["model"] for p in Edge.payloads], [jev.LUNA, jev.SOL])
+        self.assertEqual([r["sticky"] for r in self.records], [False, False])
+
     def test_the_next_user_ask_opens_exactly_one_new_decision(self):
         opening = [message("user", "run the tests and fix what breaks")]
         with self.decide(jev.SOL, "high") as judge:
@@ -238,14 +249,16 @@ class StickyTurnEndToEnd(unittest.TestCase):
 
     def test_a_compaction_mid_turn_does_not_re_decide(self):
         opening = [message("user", "refactor the router tests")]
-        with self.decide(jev.ASTRA, "xhigh") as judge:
+        with mock.patch.object(jev, "STICKY_TURN_ENABLED", True), self.decide(
+            jev.LUNA, "low"
+        ) as judge:
             self.call(payload_for(opening + [tool_call("c0"), tool_step("c0", "ok")]))
             compacted = [message("user", "You are creating a lossy continuation checkpoint"),
                          message("assistant", "checkpoint"),
                          message("user", "refactor the router tests")]
             self.call(payload_for(compacted))
         judge.assert_called_once()
-        self.assertEqual([p["model"] for p in Edge.payloads], [jev.ASTRA, jev.ASTRA])
+        self.assertEqual([p["model"] for p in Edge.payloads], [jev.LUNA, jev.LUNA])
         self.assertEqual([r["sticky"] for r in self.records], [False, True])
 
     def test_the_jev_projection_never_becomes_the_execution_context(self):

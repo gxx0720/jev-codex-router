@@ -91,6 +91,8 @@ class TandemHandoff(unittest.TestCase):
         self.enterContext(mock.patch.object(jev, "GO_FRONTIER", "fixture/frontier"))
         self.enterContext(mock.patch.object(jev, "GO_TANDEM",
                                           ("fixture/standard", "fixture/frontier")))
+        self.enterContext(mock.patch.object(jev, "read_weekly_remaining_percent",
+                                            return_value=100.0, create=True))
         self.logged = threading.Event()
         original_log = jev.log_line
 
@@ -140,7 +142,8 @@ class TandemHandoff(unittest.TestCase):
             body = error.read()
             error.close()
             result = error.code, body
-        self.assertTrue(self.logged.wait(2), "wait for post-response state and telemetry")
+        self.assertTrue(self.logged.wait(2),
+                        f"wait for post-response state and telemetry; result={result!r}; attempts={Edge.attempts!r}")
         return result
 
     def test_a_refused_tandem_call_is_retried_on_the_sibling(self):
@@ -178,8 +181,8 @@ class TandemHandoff(unittest.TestCase):
                     "route": {"choice": f"{tier}:{depth}", "confidence": 0.1},
                 }}
             ):
-                # Each case is its own turn: routing is sticky per turn, so the
-                # same ask would (correctly) keep the first case's route.
+                # Keep each case isolated so an explicitly enabled sticky mode
+                # cannot reuse the first case's route.
                 status, body = self.call(service_tier=client_speed,
                                          reasoning={"effort": "max", "summary": "auto"},
                                          input=[{
@@ -194,6 +197,21 @@ class TandemHandoff(unittest.TestCase):
                 self.assertEqual(sent["reasoning"], {"effort": depth, "summary": "auto"})
                 self.assertEqual(sent["service_tier"], "default")
                 self.assertTrue(sent["stream"])
+
+    def test_last_one_percent_of_weekly_codex_quota_routes_only_to_deepseek(self):
+        jev.native_dry = lambda: None
+        with mock.patch.object(jev, "read_weekly_remaining_percent", return_value=0.9), mock.patch.object(
+            jev, "call_jev_routed"
+        ) as judge:
+            status, body = self.call()
+
+        self.assertEqual(status, 200, body)
+        self.assertEqual(Edge.attempts[-1], (jev.WEEKLY_GUARD_MODEL, jev.WEEKLY_GUARD_EFFORT))
+        judge.assert_not_called()
+        with open(jev.LOG_PATH, encoding="utf-8") as handle:
+            record = json.loads(handle.readlines()[-1])
+        self.assertEqual(record["gate"], "weekly_quota_guard")
+        self.assertEqual(record["weekly_remaining_percent"], 0.9)
 
     def test_kill_switch_and_shadow_do_not_inherit_fast(self):
         jev.native_dry = lambda: None

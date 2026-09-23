@@ -5,8 +5,10 @@ if curl -s -m 5 http://127.0.0.1:4319/health >/dev/null 2>&1; then
   exit 0
 fi
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LOG="$HOME/.codex/codex-router/jev-watchdog.log"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+LOG="$CODEX_HOME/codex-router/jev-watchdog.log"
 PYTHON="$(command -v /usr/local/bin/python3 || command -v python3)"
+mkdir -p "$(dirname "$LOG")"
 echo "[$(date '+%Y-%m-%dT%H:%M:%S')] server down → restart" >> "$LOG"
 cd "$REPO" || exit 1
 nohup "$PYTHON" server/jev_server.py >> "$LOG" 2>&1 &

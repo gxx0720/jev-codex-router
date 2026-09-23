@@ -1,6 +1,6 @@
 # Jev Codex Router
 
-[![ci](https://github.com/0xNatoshi/jev-codex-router/actions/workflows/ci.yml/badge.svg)](https://github.com/0xNatoshi/jev-codex-router/actions/workflows/ci.yml)
+[![ci](https://github.com/gxx0720/jev-codex-router/actions/workflows/ci.yml/badge.svg)](https://github.com/gxx0720/jev-codex-router/actions/workflows/ci.yml)
 
 **Per-turn model routing for Codex, driven by [Jev](https://docs.typesafe.ai) (TypeSafe System One).**
 
@@ -57,9 +57,10 @@ Codex ──▶ Codex Router (:4202)
 
 ## Routing policy
 
-The shared contract in `server/routing_policy.py` gives Jev 15 explicit pairs:
-Luna, Sol or Astra × low, medium, high, xhigh or max thinking. Jev chooses the
-pair in one Choice question, using capability profiles and the current request,
+The shared contract in `routing-config.json` gives Jev 12 explicit pairs:
+DeepSeek Flash, GPT-6 Luna and GPT-6 Sol with their configured reasoning
+efforts. GPT-5.6 and GPT-6 Astra are disabled in the active policy. Jev chooses a pair
+in one Choice question, using capability profiles and the current request,
 recent assistant intent, and the available tool result. Every pair uses standard
 speed, overriding an incoming Fast setting, including retries and bypass modes.
 
@@ -74,10 +75,19 @@ The policy must be evaluated on completed tasks, corrections, tokens and quota,
 not on a desired share of Luna calls or artificially high confidence. Schema
 checks and synthetic routing samples establish wiring, not equal-quality savings.
 A missing/invalid Jev response or a provider error still uses the separately
-logged technical fail-open route (Astra at medium); the manual kill switch and
+logged technical fail-open route (GPT-6 Sol at medium); the manual kill switch and
 native-quota exhaustion are operational bypasses, not Jev decisions.
 
 ### Codex-dry tandem — only while native usage is exhausted
+
+The weekly quota guard is a separate earlier threshold: when the seven-day
+Codex window has 1% or less remaining, Jev bypasses model selection and serves
+`deepseek/deepseek-v4-flash-vision-exp` at `low`. It reads the account window
+from Codex app-server before every model call. An unavailable quota read also
+forces this DeepSeek route, so GPT is not selected while the weekly balance is
+unknown. Normal choices resume once more than 1% remains. Configure the guard in
+`routing-config.json`; `weekly_remaining_percent` and `weekly_quota_guard` in
+the route log show its state.
 
 The triptych is the policy **unless** the ChatGPT usage window is exhausted
 (manual sentinel file, or an automatic flip on a 429 / usage-limit response,
@@ -115,7 +125,11 @@ Native turns are untouched — their ids already match.
 
 ## Measuring what it served
 
-The router logs one JSON line per decision (`~/.codex/codex-router/jev-router-live.jsonl`).
+The router logs one JSON line per decision under a private per-conversation
+directory (`~/.codex/codex-router/sessions/<session-hash>/jev-router-live.jsonl`).
+The directory name is a short irreversible hash of Codex's `prompt_cache_key`;
+the raw conversation identifier is never written to disk. Requests without a
+conversation key fall back to a hash of the task text.
 `server/report_routing.py` turns that log into the routing/savings report — the
 table a third party can reproduce on their own machine:
 
@@ -145,15 +159,15 @@ Their logged Fast speed retains its surcharge instead of being repriced by the
 new policy. The old backtest is clearly labelled as a simulation. Current replay
 scripts share the live decision contract and reject a cache from another policy.
 
-Routing is turn-scoped: the call that opens a turn (a user message) gets one Jev
-decision, and every continuation of that turn — tool steps, retries, and the call
-that follows a mid-turn compaction — reuses it, so the serving model cannot flip
-mid-turn. A new user ask opens the next turn; an entry that reused the turn's
-route carries `sticky: true` and the `gate` of the decision that opened it. The
-compact projection sent to Jev (task, signals, tool digest) is judgement input
-only: it is never reused as an execution prompt. The executing model always
-receives the caller's canonical request, with only the selected model, reasoning
-effort, standard service tier and required streaming flag applied to the relay.
+Routing is flexible per call by default: user turns, tool steps, retries and
+post-compaction calls each receive a fresh Jev decision, so a long task can move
+between models as its work changes. Set `sticky_turn_enabled` to `true` in
+`routing-config.json` to opt into one decision per turn; reused entries then
+carry `sticky: true`. The compact projection sent to Jev (task, signals, tool
+digest) is judgement input only: it is never reused as an execution prompt. The
+executing model always receives the caller's canonical request, with only the
+selected model, reasoning effort, standard service tier and required streaming
+flag applied to the relay.
 
 ## Ask surface (`POST /ask`)
 
@@ -187,8 +201,11 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 
 ## Quickstart
 
-Prerequisites: macOS, a Codex desktop install wired to a **Codex Router**
-(checkout with `bin/codex-router`), Python 3.11+, and a TypeSafe API key (Jev).
+Prerequisites: macOS or Linux, Codex CLI, a **Codex Router** install on the same
+host (checkout with `bin/codex-router`), Python 3.11+, and a TypeSafe API key
+(Jev). Jev relays through the local Codex Router edge; it is not a standalone
+replacement for that router. Windows remains supported by the existing
+Windows-specific launcher/service setup.
 
 **1. Give the server your TypeSafe key** — either
 `export TYPESAFE_API_KEY=...` in the service environment, or:
@@ -258,34 +275,42 @@ cd <codex-router checkout>
 ./bin/control picker set jev/auto show
 ```
 
-**4. Quit and reopen Codex**, then pick **“Jev Codex Router”** in the model picker.
+**4. Quit and reopen Codex CLI (or desktop)**, then pick **“Jev Codex Router”**
+in the model chooser.
 Check the transport as well as the picker: `jev/auto` must reach the local
 router, not OpenAI's native endpoint. A catalog entry or a
 `[model_providers.jev]` declaration alone does not select that transport.
 See [transport troubleshooting](server/INSTALL.md#model-visible-but-rejected-by-chatgpt)
 if Codex reports that `jev/auto` is unsupported with a ChatGPT account.
 
-**5. Make it permanent** (optional but recommended): run the service installer
-in your own Terminal (launchd management is intentionally restricted inside
-supervised agents):
+**5. Make it permanent** (optional but recommended): install a per-user service
+for your OS. This writes only to your user service manager; no root privileges
+are required on Linux:
 
 ```bash
+# macOS
 bash server/install-service.sh
+
+# Linux with systemd --user
+bash server/install-service-linux.sh
 ```
 
-Without it, `server/watchdog.sh` (cron every 5 min) restarts the server if it
-stops answering.
+Linux hosts without a running systemd user manager can use `server/watchdog.sh`
+from cron (every 5 min). A headless Linux machine may require explicit
+`loginctl enable-linger "$USER"` to keep the user service running after logout.
+Set `CODEX_HOME` the same way for Codex, Codex Router, and Jev when using a
+non-default Codex profile.
 
 ## Operations
 
 | Action | Command |
 |---|---|
-| Watch decisions | `tail -f ~/.codex/codex-router/jev-router-live.jsonl` |
-| See the picked model in the thread | every reasoning summary part carries the routed tag, separators on both sides: ` · 🧠sol:low · ` — one glyph per route: ⚡ luna (economical) · 🧠 sol (workhorse) · 🚀 astra (frontier) · 🌍 terra; 🐳 deepseek / ✨ glm while the Codex-dry tandem is serving |
-| Show the model and thinking above every assistant message | `touch ~/.codex/codex-router/jev-router.signature` — a leading `**🧠 sol · thinking: high**` appears from the first text fragment, including commentary and unphased replies; remove the file to disable |
-| Shadow mode (decide + log, serve astra) | `touch ~/.codex/codex-router/jev-router.shadow` |
+| Watch decisions | `tail -f "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router-live.jsonl"` |
+| See the picked model in the thread | every reasoning summary part carries the full model family tag, e.g. ` · 🧠 GPT-6 Sol:low · ` or ` · ⚡ GPT-6 Luna:low · ` |
+| Show the model and thinking above every assistant message | `touch ~/.codex/codex-router/jev-router.signature` — a leading `**🧠 GPT-6 Sol · thinking: high**` appears from the first text fragment, including commentary and unphased replies; remove the file to disable |
+| Shadow mode (decide + log, serve configured shadow route) | `touch ~/.codex/codex-router/jev-router.shadow` |
 | Debug capture (shapes + raw streams) | `touch ~/.codex/codex-router/jev-router.debug` |
-| Kill switch (no Jev → frontier) | `touch ~/.codex/codex-router/jev-router.off` (delete the file to re-enable) |
+| Kill switch (no Jev → configured off route) | `touch ~/.codex/codex-router/jev-router.off` (delete the file to re-enable) |
 | Force the Codex-dry tandem | `touch ~/.codex/codex-router/jev-router.codex-dry` (delete the file to return to luna/sol/astra) |
 | Inspect the dry auto state | `cat ~/.codex/codex-router/jev-router.codex-dry.json` (reason + expiry; auto-cleared by the next successful native call) |
 | Hide the model | `./bin/control picker set jev/auto hide` |

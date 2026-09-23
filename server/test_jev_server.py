@@ -16,6 +16,81 @@ from unittest import mock
 import jev_server as jev
 
 
+class LifecycleDiagnostics(unittest.TestCase):
+    def test_launcher_records_start_and_child_exit(self):
+        launcher = os.path.join(os.path.dirname(__file__), "..", "start-jev-router.ps1")
+        with open(launcher, encoding="utf-8-sig") as fh:
+            script = fh.read()
+
+        self.assertIn('Write-LifecycleEvent "launcher_start"', script)
+        self.assertIn('Write-LifecycleEvent "child_exit"', script)
+        self.assertIn('Write-LifecycleEvent "launcher_error"', script)
+        self.assertIn('$ErrorActionPreference = "Continue"', script)
+        self.assertIn('& "C:\\Windows\\py.exe"', script)
+        self.assertIn('2>> $StderrLog', script)
+        self.assertNotIn("Start-Process", script)
+
+    def test_lifecycle_event_writes_structured_process_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "jev-lifecycle.jsonl")
+            with mock.patch.object(jev, "LIFECYCLE_PATH", path):
+                jev.lifecycle_event("heartbeat", source="python")
+
+            with open(path, encoding="utf-8") as fh:
+                record = json.loads(fh.readline())
+
+            self.assertEqual(record["event"], "heartbeat")
+            self.assertEqual(record["source"], "python")
+            self.assertEqual(record["pid"], os.getpid())
+            self.assertRegex(record["at"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_heartbeat_loop_emits_until_stopped(self):
+        class StopAfterOneBeat:
+            calls = 0
+
+            def wait(self, _interval):
+                self.calls += 1
+                return self.calls > 1
+
+        events = []
+        with mock.patch.object(jev, "lifecycle_event", side_effect=lambda event, **_: events.append(event)):
+            jev.heartbeat_loop(StopAfterOneBeat(), interval=0)
+
+        self.assertEqual(events, ["heartbeat"])
+
+    def test_main_records_an_unhandled_server_failure(self):
+        server = mock.Mock()
+        server.serve_forever.side_effect = RuntimeError("boom")
+        events = []
+        with mock.patch.object(jev, "ThreadingHTTPServer", return_value=server), mock.patch.object(
+            jev, "lifecycle_event", side_effect=lambda event, **fields: events.append((event, fields))
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                jev.main()
+
+        names = [event for event, _ in events]
+        self.assertEqual(names[0], "process_start")
+        self.assertIn("server_ready", names)
+        self.assertIn("process_exception", names)
+        self.assertEqual(names[-1], "process_stop")
+        server.server_close.assert_called_once_with()
+
+
+class RouteLogLocation(unittest.TestCase):
+    def test_route_log_stays_in_the_single_global_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            global_log = os.path.join(tmp, "jev-router-live.jsonl")
+            session_root = os.path.join(tmp, "sessions")
+            with mock.patch.object(jev, "LOG_PATH", global_log), mock.patch.object(
+                jev, "SESSION_LOGS", session_root, create=True
+            ):
+                jev.log_line({"event": "route"}, scope="conversation-a")
+
+            with open(global_log, encoding="utf-8") as fh:
+                self.assertEqual(json.loads(fh.readline()), {"event": "route"})
+            self.assertFalse(os.path.exists(session_root))
+
+
 class ResponseIdContinuity(unittest.TestCase):
     """One response id per relayed stream, however many gateways touched it.
 
@@ -31,7 +106,7 @@ class ResponseIdContinuity(unittest.TestCase):
     DONE = b"data: [DONE]\n\n"
 
     def relay(self, *frames):
-        markerer = jev.SummaryMarker(" \u00b7 \U0001f9e0sol:low \u00b7 ")
+        markerer = jev.SummaryMarker(" \u00b7 \U0001f9e0 GPT-6 Sol:low \u00b7 ")
         return "".join(markerer.feed(frame) for frame in frames) + markerer.flush()
 
     def response_ids(self, stream):
@@ -200,8 +275,8 @@ class Policy(unittest.TestCase):
         self.assertEqual((model, effort, speed, gate), (jev.LUNA, "low", "default", "apply"))
 
     def test_a_confident_verdict_is_applied_as_given(self):
-        model, effort, speed, gate = jev.route(jev.ASTRA, "max", 0.9, {"step_type": "user_turn"})
-        self.assertEqual((model, effort, speed, gate), (jev.ASTRA, "max", "default", "apply"))
+        model, effort, speed, gate = jev.route(jev.SOL, "max", 0.9, {"step_type": "user_turn"})
+        self.assertEqual((model, effort, speed, gate), (jev.SOL, "max", "default", "apply"))
 
     def test_an_invalid_depth_does_not_silently_change_the_jev_choice(self):
         with self.assertRaises(ValueError):
@@ -259,6 +334,18 @@ class JevTaskInput(unittest.TestCase):
         self.assertEqual(self.task(self.PLUGINS), "")
         self.assertEqual(self.task(self.ENV), "")
 
+    def test_an_envelope_only_tail_does_not_hide_the_previous_user_ask(self):
+        payload = {
+            "input": [
+                self.user_item(self.ASK),
+                self.user_item(self.ENV),
+            ],
+        }
+
+        task, _assistant, _signals = jev.extract(payload)
+
+        self.assertEqual(task, self.ASK)
+
     def test_the_tail_of_a_long_prompt_survives_the_clip(self):
         task = self.task("Contexte. " * 900 + self.ASK)
         self.assertIn("relance le backtest complet.", task)
@@ -267,6 +354,25 @@ class JevTaskInput(unittest.TestCase):
 
     def test_a_short_prompt_is_sent_untouched(self):
         self.assertEqual(self.task(self.ASK), self.ASK)
+
+    def test_invalid_text_parts_are_removed_but_non_text_content_is_preserved(self):
+        payload = {
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "keep"},
+                    {"type": "input_text"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    {"type": "output_text", "text": None},
+                ],
+            }],
+        }
+
+        self.assertEqual(jev.strip_invalid_text_parts(payload), 2)
+        self.assertEqual(payload["input"][0]["content"], [
+            {"type": "input_text", "text": "keep"},
+            {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+        ])
 
     def test_the_thread_length_never_reaches_jev(self):
         history = [self.user_item("Question %d" % i) for i in range(300)]
@@ -299,6 +405,93 @@ class JevTaskInput(unittest.TestCase):
                      "content": [{"type": "output_text", "text": "a" * 4_000}]}
         state = self.state([self.user_item(self.ASK), assistant])
         self.assertEqual(len(state["previous_assistant"]), 240)
+
+
+class ConfiguredOperationalRouting(unittest.TestCase):
+    def test_operational_routes_are_exposed_from_the_policy(self):
+        self.assertEqual(
+            jev.configured_route("fallback"),
+            (jev.FALLBACK_MODEL, jev.FALLBACK_EFFORT),
+        )
+        self.assertEqual(
+            jev.configured_route("off"),
+            (jev.OFF_MODEL, jev.OFF_EFFORT),
+        )
+        self.assertEqual(
+            jev.configured_route("shadow"),
+            (jev.SHADOW_MODEL, jev.SHADOW_EFFORT),
+        )
+        with self.assertRaises(ValueError):
+            jev.configured_route("unknown")
+
+    def test_disabled_codex_dry_mode_ignores_a_dry_sentinel(self):
+        saved = (jev.CODEX_DRY_ENABLED, jev.native_dry)
+        try:
+            jev.CODEX_DRY_ENABLED = False
+            jev.native_dry = lambda: "manual"
+            self.assertIsNone(jev.configured_dry_reason())
+            jev.CODEX_DRY_ENABLED = True
+            self.assertEqual(jev.configured_dry_reason(), "manual")
+        finally:
+            jev.CODEX_DRY_ENABLED, jev.native_dry = saved
+
+
+class MultimodalCompatibility(unittest.TestCase):
+    def test_extract_marks_image_audio_video_and_file_inputs_as_multimodal(self):
+        for media_type in ("input_image", "image_url", "input_audio", "input_video", "input_file"):
+            with self.subTest(media_type=media_type):
+                payload = {"input": [{"role": "user", "content": [
+                    {"type": "input_text", "text": "Summarize this"},
+                    {"type": media_type},
+                ]}]}
+                _task, _assistant, signals = jev.extract(payload)
+                self.assertTrue(signals["has_multimodal"])
+
+    def test_media_in_older_input_is_not_lost_by_tail_scanning(self):
+        payload = {"input": [
+            {"role": "user", "content": [{"type": "input_image"}]},
+            *[{"type": "function_call_output", "output": "done"} for _ in range(8)],
+        ]}
+        _task, _assistant, signals = jev.extract(payload)
+        self.assertTrue(signals["has_multimodal"])
+
+    def test_tool_history_signal_still_only_covers_the_recent_tail(self):
+        payload = {"input": [
+            {"type": "function_call_output", "output": "old"},
+            *[{"role": "user", "content": "text"} for _ in range(8)],
+        ]}
+        _task, _assistant, signals = jev.extract(payload)
+        self.assertFalse(signals["tool_history"])
+
+    def test_weekly_deepseek_guard_fails_closed_for_multimodal_requests(self):
+        message = jev.multimodal_guard_error(True, {"has_multimodal": True})
+        self.assertIn("DeepSeek", message)
+        self.assertIn("weekly quota guard", message)
+        self.assertIsNone(jev.multimodal_guard_error(False, {"has_multimodal": True}))
+
+    def test_multimodal_jev_question_only_offers_compatible_models(self):
+        questions = jev.questions_for_multimodal()
+        criteria = questions["route"]["criteria"]
+        self.assertTrue(criteria)
+        self.assertTrue(all(not pair["model"].startswith("deepseek")
+                            for pair in criteria.values()))
+        self.assertEqual({pair["model"] for pair in criteria.values()},
+                         {"gpt-6-sol", "gpt-6-luna"})
+
+    def test_multimodal_validation_rejects_a_deepseek_decision(self):
+        choices = set(jev.questions_for_multimodal()["route"]["criteria"])
+        with self.assertRaisesRegex(ValueError, "unknown joint route choice"):
+            jev.decision_from_answers(
+                {"route": {"choice": "deepseek/deepseek-v4-flash-vision-exp:low",
+                           "confidence": 1.0}},
+                allowed_choices=choices,
+            )
+        decision = jev.decision_from_answers(
+            {"route": {"choice": "gpt-6-sol:medium", "confidence": 1.0,
+                       "probabilities": {choice: 1 / len(choices) for choice in choices}}},
+            allowed_choices=choices,
+        )
+        self.assertEqual(decision["model"], "gpt-6-sol")
 
 
 if __name__ == "__main__":

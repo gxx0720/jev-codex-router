@@ -8,14 +8,27 @@ shared ChatGPT session.
 
 ## Lifecycle
 
+The Codex CLI and Jev Router must both be installed on the same host. Jev
+relays through that host's Codex Router loopback edge at `127.0.0.1:4202`; it
+does not bypass Codex Router or share the Windows service remotely. Use the
+Codex Router release/build supported by your Mac or Linux distribution.
+
+On macOS/Linux, run `codex` from the CLI and select `Jev Codex Router` after the
+router catalog is refreshed. For a direct CLI endpoint override, follow
+[Codex's user-level configuration guidance](https://learn.chatgpt.com/docs/config-file/config-advanced)
+and preserve the protected caller secret; never put it in shell history or a
+project-level config. Set `CODEX_HOME` consistently for Codex, Jev, and the
+Codex Router when using a non-default profile.
+
 | Action | Command |
 |---|---|
-| Decision log | `tail -f ~/.codex/codex-router/jev-router-live.jsonl` |
-| Kill switch (no Jev → frontier) | `touch ~/.codex/codex-router/jev-router.off` / `rm` to re-enable |
-| Install the launchd service | `bash server/install-service.sh` (in your own Terminal) |
-| Service status | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` |
-| Service restart | `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
-| Watchdog (no launchd) | `server/watchdog.sh`, e.g. cron every 5 min |
+| Decision log | `tail -f "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router-live.jsonl"` |
+| Kill switch (no Jev → frontier) | `touch "${CODEX_HOME:-$HOME/.codex}/codex-router/jev-router.off"`; remove file to re-enable |
+| Install macOS service | `bash server/install-service.sh` (your Terminal) |
+| Install Linux user service | `bash server/install-service-linux.sh` (no root; systemd user session required) |
+| macOS status/restart | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` / `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
+| Linux status/restart | `systemctl --user status jev-codex-router` / `systemctl --user restart jev-codex-router` |
+| Watchdog (either OS) | `bash server/watchdog.sh`, e.g. cron every 5 min |
 | Hide the model | `./bin/control picker set jev/auto hide` (router checkout) |
 | Disable the provider | `./bin/codex-router providers generic disable jev` |
 | Revoke native sharing | `./bin/codex-router chatgpt-session disable` |
@@ -66,7 +79,7 @@ does not associate an existing task with that provider.
 4. Verify a small request through **4202 → Jev 4319 → native 4202**, then through
    an ephemeral Codex invocation reading the saved configuration. Checking
    Jev's health alone does not exercise the client transport.
-5. Quit and reopen Codex on the host Mac to reload the configuration before
+5. Quit and reopen Codex CLI (or desktop) on the host to reload the configuration before
    retrying the existing task from desktop or mobile.
 
 The built-in OpenAI transport override was verified with Codex

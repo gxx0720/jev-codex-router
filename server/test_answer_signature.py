@@ -7,9 +7,9 @@ import jev_server as jev
 
 
 class AnswerHeader(unittest.TestCase):
-    HEADER = "**🧠 sol · thinking: low**\n\n"
-    TAG = " · 🧠 sol:low · "
-    LEGACY = "\n\n— 🧠 sol · low"
+    HEADER = "**🧠 GPT-6 Sol · thinking: low**\n\n"
+    TAG = " · 🧠 GPT-6 Sol:low · "
+    LEGACY = "\n\n— 🧠 GPT-6 Sol · low"
 
     @staticmethod
     def frame(event):

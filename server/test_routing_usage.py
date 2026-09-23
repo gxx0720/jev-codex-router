@@ -32,8 +32,8 @@ class Usage(unittest.TestCase):
     def test_reasoning_is_not_billed_twice(self):
         usage = {"input_tokens": 1_000_000, "cached_input_tokens": 800_000,
                  "output_tokens": 100_000, "reasoning_tokens": 90_000}
-        self.assertEqual(report.token_credits(j.SOL, usage), 78.0)
-        self.assertEqual(report.token_credits(j.LUNA, usage), 4.4)
+        self.assertEqual(report.token_credits(j.SOL, usage), 39.0)
+        self.assertEqual(report.token_credits(j.LUNA, usage), 1.95)
 
     def test_retries_count_and_external_fallback_does_not_inflate_native_savings(self):
         usage = {"input_tokens": 1_000_000, "cached_input_tokens": 0, "output_tokens": 0}
@@ -48,16 +48,16 @@ class Usage(unittest.TestCase):
         self.assertEqual(result["priced_attempts"], 2)
         self.assertEqual(result["unknown_attempts"], 1)
         self.assertEqual(result["legacy_calls_without_attempts"], 1)
-        self.assertEqual(result["routed_credits"], 105.0)
-        self.assertEqual(result["all_sol_credits"], 200.0)
+        self.assertEqual(result["routed_credits"], 52.5)
+        self.assertEqual(result["all_sol_credits"], 100.0)
         self.assertEqual(result["all_astra_credits"], 500.0)
 
     def test_historical_fast_calls_keep_their_api_surcharge(self):
-        for model in j.TIERS:
+        for model in (j.LUNA, j.SOL, j.ASTRA):
             self.assertAlmostEqual(report.turn_cost(model, speed="priority"),
-                                   2 * report.turn_cost(model, speed="default"))
+                                   2.5 * report.turn_cost(model, speed="default"))
             self.assertAlmostEqual(report.turn_cost(model, speed="fast"),
-                                   2 * report.turn_cost(model, speed="default"))
+                                   2.5 * report.turn_cost(model, speed="default"))
 
 
 if __name__ == "__main__":
