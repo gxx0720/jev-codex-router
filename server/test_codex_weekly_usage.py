@@ -45,6 +45,24 @@ class CodexBinaryDiscovery(unittest.TestCase):
 
 
 class AppServerQuotaRead(unittest.TestCase):
+    def test_retries_one_unavailable_quota_read_before_returning_a_value(self):
+        with mock.patch.object(
+            usage, "_read_weekly_remaining_percent_once", create=True,
+            side_effect=[None, 95.0],
+        ) as read_once:
+            self.assertEqual(usage.read_weekly_remaining_percent(timeout=0.01), 95.0)
+
+        self.assertEqual(read_once.call_count, 2)
+
+    def test_still_returns_unknown_when_both_quota_reads_fail(self):
+        with mock.patch.object(
+            usage, "_read_weekly_remaining_percent_once", create=True,
+            side_effect=[None, None],
+        ) as read_once:
+            self.assertIsNone(usage.read_weekly_remaining_percent(timeout=0.01))
+
+        self.assertEqual(read_once.call_count, 2)
+
     def test_requests_rate_limits_through_codex_app_server(self):
         init = {"id": 1, "result": {"codexHome": "private"}}
         limits = {"id": 2, "result": {"rateLimits": {

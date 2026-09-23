@@ -75,12 +75,8 @@ def weekly_remaining_percent(rate_limit_response):
     return None
 
 
-def read_weekly_remaining_percent(timeout=4.0):
-    """Fetch fresh account/rateLimits through Codex app-server.
-
-    Returns None on any unavailable or malformed response. The routing policy
-    treats None as the protected state when its weekly quota guard is enabled.
-    """
+def _read_weekly_remaining_percent_once(timeout):
+    """Fetch one fresh account/rateLimits response through Codex app-server."""
     binary = find_codex_binary()
     if not binary:
         return None
@@ -176,3 +172,12 @@ def read_weekly_remaining_percent(timeout=4.0):
                     process.kill()
                 except OSError:
                     pass
+
+
+def read_weekly_remaining_percent(timeout=4.0):
+    """Read usage, retrying one transient failure before failing closed."""
+    for _attempt in range(2):
+        remaining = _read_weekly_remaining_percent_once(timeout)
+        if remaining is not None:
+            return remaining
+    return None
