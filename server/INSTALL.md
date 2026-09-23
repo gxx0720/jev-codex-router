@@ -8,10 +8,12 @@ shared ChatGPT session.
 
 ## Lifecycle
 
-The Codex CLI and Jev Router must both be installed on the same host. Jev
-relays through that host's Codex Router loopback edge at `127.0.0.1:4202`; it
-does not bypass Codex Router or share the Windows service remotely. Use the
-Codex Router release/build supported by your Mac or Linux distribution.
+Codex App or Codex CLI must already be installed, and Codex Router plus Jev
+must run on the same host. Jev relays through that host's Codex Router loopback
+edge at `127.0.0.1:4202`; it does not bypass Codex Router or share the Windows
+service remotely. For a fresh macOS/Linux setup, follow the repository's
+[agent installation playbook](../AGENTS.md), which installs the maintained
+Codex Router CLI-only build when needed. Do not overwrite an unknown router.
 
 On macOS/Linux, run `codex` from the CLI and select `Jev Codex Router` after the
 router catalog is refreshed. For a direct CLI endpoint override, follow
@@ -29,19 +31,18 @@ Codex Router when using a non-default profile.
 | macOS status/restart | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` / `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
 | Linux status/restart | `systemctl --user status jev-codex-router` / `systemctl --user restart jev-codex-router` |
 | Watchdog (either OS) | `bash server/watchdog.sh`, e.g. cron every 5 min |
-| Hide the model | `./bin/control picker set jev/auto hide` (router checkout) |
-| Disable the provider | `./bin/codex-router providers generic disable jev` |
-| Revoke native sharing | `./bin/codex-router chatgpt-session disable` |
+| Disable the provider | `./bin/model-router codex providers disable jev` |
+| Revoke native sharing | `./bin/model-router codex chatgpt-session disable` |
 
 ## After a Codex Router update
 
 Provider and model state live outside the router checkout, so updates should not
 touch them. Verify anyway:
 
-1. `./bin/codex-router providers generic list` → should show `SHOW jev`.
+1. `<router>/bin/model-router codex providers` → should show `SHOW` and `ready` for Jev.
 2. `cat ~/.codex/codex-router/model-picker.json` → `jev/auto` under `visible`.
 3. `curl -s http://127.0.0.1:4319/health` → `{"ok": true...}`.
-4. If needed: `./bin/codex-router refresh-catalog`, then restart Codex.
+4. If needed: `<router>/bin/refresh-catalog`, then restart Codex.
 
 ## Troubleshooting
 
@@ -50,12 +51,12 @@ touch them. Verify anyway:
   forces `Content-Type: text/event-stream` on streamed replies for exactly this
   reason; make sure you run the current `jev_server.py`.
 - **401 / route refused by the edge**: the shared ChatGPT session expired —
-  re-run `./bin/codex-router chatgpt-session enable`.
+  re-run `<router>/bin/model-router codex chatgpt-session enable`.
 - **Every turn routes to astra**: check the decision log (`gate` field) — the
   kill switch may be on, or the TypeSafe key is unreadable (look for
   `jev_error` / `no_key_or_task` gates).
-- **Model missing from the picker**: re-run `refresh-catalog` and
-  `picker set jev/auto show`, then fully restart Codex.
+- **Model missing from the picker**: re-run `<router>/bin/refresh-catalog`,
+  verify the provider is enabled and model is curated, then fully restart Codex.
 
 ### Model visible but rejected by ChatGPT
 
@@ -64,10 +65,10 @@ can mean the model is selected while the OpenAI provider still points directly
 at OpenAI. Listing a model in a catalog, or declaring `[model_providers.jev]`,
 does not associate an existing task with that provider.
 
-1. Inspect `./bin/codex-router status`: check `model_provider` and the redacted
+1. Inspect `./bin/model-router codex status`: check `model_provider` and the redacted
    `openai_base_url`, not just whether the service is running.
 2. Verify the main router has the enabled `jev` generic provider and the
-   `jev/auto` entry in `user-models.json`. A direct Codex provider declaration
+   `jev/auto` entry in its curated model catalog. A direct Codex provider declaration
    is a separate configuration. Reload the router after restoring its routes;
    its startup regenerates the gateway configuration from source.
 3. Preserve a user-owned `model_catalog_json`. With the built-in `openai`

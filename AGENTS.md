@@ -38,15 +38,49 @@ All traffic stays on loopback; the design is fail-open; there is a kill switch.
 
 ## Prerequisites (check, and report what you found)
 
-- **macOS or Linux** with **Codex CLI** and a **Codex Router installation** (the local router
-  that serves native GPT models to Codex on `127.0.0.1:4202`).
-  Check: `<router checkout>/bin/codex-router status` → expect
-  `{"state":"running"}`; `./bin/codex-router providers generic list` must exist.
-- **Python ≥ 3.11** — `python3 -V`.
+- **macOS or Linux with Codex App or Codex CLI already installed.** This is a
+  hard prerequisite; this project does not install Codex. Check `command -v
+  codex` (CLI users) and do not modify Codex login/configuration until the user
+  approves the relevant step.
+- **Git, Node.js ≥ 22.19, and either `uv` or Python ≥ 3.10 with `venv`** for
+  Codex Router. Check with `git --version`, `node --version`, `uv --version`,
+  and `python3 -V`. Do not silently install package managers/runtimes. If one is
+  missing, stop and tell the user exactly which official prerequisite is needed.
+- **Python ≥ 3.11** for Jev — `python3 -V`.
 - A **TypeSafe API key** for Jev. The server looks for `TYPESAFE_API_KEY` in
   `~/.hermes/.env` first, then `~/.jev.env`, then the process environment.
   If none exists, **stop and ask the user where their key file is — never ask
   for the key value itself in chat.**
+
+## Install Codex Router (if not already installed)
+
+The former `0xNatoshi/jev-codex-router` repository is archived. Use the
+maintained Codex Router project referenced by the current official community
+installation guide: <https://github.com/duolahypercho/codex-router>. For this
+CLI integration, install the CLI-only build without selecting unrelated
+providers or collecting their credentials.
+
+1. Check for an existing compatible checkout at
+   `~/.local/share/codex-router` and for a working `codex-router` command. If a
+   router is present but its version/owner is unclear, **stop and ask**; do not
+   replace, stop, or migrate an unknown router.
+2. If absent, clone the maintained repository into
+   `~/.local/share/codex-router` (do not overwrite an existing directory),
+   inspect its `AGENTS.md` and `install.sh`, then run:
+
+   ```bash
+   ./install.sh --target codex --no-provider --no-discovery
+   ```
+
+   Follow any installer prompts in the user's terminal. This project does not
+   need the router's desktop UI.
+3. Set `ROUTER="$HOME/.local/share/codex-router/bin/model-router"` and verify
+   `"$ROUTER" codex doctor`. Do not proceed until the router reports a healthy
+   install, or explain the specific failure and stop.
+
+The official router installation guide is the authority if its command line
+changes: <https://codex-router.com/install/>. Codex itself is a user-provided
+prerequisite, not installed by either project.
 
 ## Install, step by step
 
@@ -59,67 +93,46 @@ curl -s http://127.0.0.1:4319/health      # expect: {"ok": true, "service": "jev
 curl -s http://127.0.0.1:4319/v1/models   # expect: one model, id "auto"
 ```
 
-### 2 — Declare the model
-
-Create `~/.codex/codex-router/user-models.json` (hand-editable state file; if
-it already has `models`, append to the array instead of overwriting):
-
-```json
-{
-  "version": 1,
-  "models": [
-    {
-      "slug": "jev/auto",
-      "gatewayModel": "jev-auto",
-      "compHash": "jev-auto-user-v1",
-      "upstreamModel": "auto",
-      "provider": "jev",
-      "listed": true,
-      "displayName": "Jev Codex Router",
-      "description": "Auto-routing by Jev (TypeSafe): every turn is classified and served by luna, sol or astra at the thinking depth it needs.",
-      "priority": 95,
-      "defaultEffort": "medium",
-      "reasoningLevels": [
-        {"effort": "low", "description": "Quick reasoning"},
-        {"effort": "medium", "description": "Balanced reasoning"},
-        {"effort": "high", "description": "Deep reasoning"},
-        {"effort": "xhigh", "description": "Extended reasoning"},
-        {"effort": "max", "description": "Maximum reasoning"}
-      ],
-      "contextWindow": 258400,
-      "autoCompact": 219640,
-      "inputModalities": ["text", "image"]
-    }
-  ]
-}
-```
-
-### 3 — Register the generic provider (router CLI)
+### 2 — Register the local endpoint and model (router CLI)
 
 ```bash
-cd <router checkout>
-./bin/codex-router providers generic add jev --name "Jev Router" \
-  --base-url http://127.0.0.1:4319/v1 --adapter openai-responses --allow-private
-./bin/codex-router providers generic list
+cd "$HOME/.local/share/codex-router"
+./bin/model-router codex providers generic add jev --name "Jev Router" \
+  --base-url http://127.0.0.1:4319/v1 --adapter openai-responses
+./bin/model-router codex providers enable jev
+./bin/curate-models jev                 # select only the advertised "auto" model
+./bin/model-router codex providers
 # expect:  SHOW jev   Jev Router (openai-responses)
 ```
 
-### 4 — Share native ChatGPT access with local clients
+The curation flow owns the model catalog. Do not hand-edit a guessed
+`user-models.json` schema; select only the advertised `auto` model and preserve
+the text/image modalities that the Jev endpoint reports.
+
+### 3 — Share native ChatGPT access with local clients
+
+This explicitly authorizes other local clients on this OS account to use the
+signed-in ChatGPT session. Ask the user to complete/confirm this authorization
+before enabling it. If they are not signed in, let them complete the official
+interactive Codex login in their own terminal first:
 
 ```bash
-./bin/codex-router chatgpt-session enable
+codex login
+./bin/model-router codex chatgpt-session enable
 # expect: "enabled for this user's local Codex Router clients (session valid
 # for about NNNh)". Re-run this when native calls later return Unauthorized.
 ```
 
-### 5 — Publish and show
+### 4 — Publish and verify
 
 ```bash
-./bin/codex-router refresh-catalog        # merged catalog must now contain "jev/auto"
-./bin/control picker set jev/auto show    # returns the picker JSON with jev/auto visible
+./bin/refresh-catalog                     # merged catalog must now contain "jev/auto"
+./bin/model-router codex providers        # confirm Jev is SHOW and ready
+./bin/model-router codex doctor
+codex debug models                        # confirm "jev/auto" is listed
 ```
 
-### 6 — Persistent service (optional)
+### 5 — Persistent service (optional)
 
 Ask the user to run, in **their own Terminal**:
 
@@ -131,7 +144,7 @@ bash <repo>/server/install-service-linux.sh   # Linux systemd --user service
 Alternative (any scheduler, every 5 min): `<repo>/server/watchdog.sh` —
 silent when healthy, restarts the server when down.
 
-### 7 — Restart Codex
+### 6 — Restart Codex
 
 Fully quit and reopen the Codex app so it reloads the picker catalog, then the
 user can select **Jev Codex Router**.
@@ -193,23 +206,23 @@ tail -1 ~/.codex/codex-router/jev-router-live.jsonl
 - **Tune the policy**: the shared contract in `server/routing_policy.py`. Keep decisions
   joint and evidence-based; restart the server after edits.
 - **Backtest**: `python3 poc/backtest_savings.py --days 7` (see BACKTEST.md).
-- **Disable**: `./bin/codex-router providers generic disable jev` (keeps state);
-  full rollback: also `./bin/codex-router chatgpt-session disable` and stop the
+- **Disable**: `./bin/model-router codex providers disable jev` (keeps state);
+  full rollback: also `./bin/model-router codex chatgpt-session disable` and stop the
   service (`launchctl bootout gui/$(id -u)/com.thibaultsaintjean.jev-router`).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `{"detail":"Unauthorized"}` from the caller edge | native sharing off | `./bin/codex-router chatgpt-session enable` |
+| `{"detail":"Unauthorized"}` from the caller edge | native sharing off | `./bin/model-router codex chatgpt-session enable` |
 | `{"detail":"Stream must be set to true"}` | the caller edge streams only | send `"stream": true`; the bundled server forces it |
 | HTTP 502 `provider_api_proxy_error` on jev-auto | server-side error | check the `status`/`out` fields in `jev-router-live.jsonl`, and the server's stderr log |
-| "Jev Codex Router" absent from the picker | not published/visible, or Codex not restarted | `refresh-catalog`, `control picker set jev/auto show`, full Codex restart |
+| "Jev Codex Router" absent from the picker | not published/visible, or Codex not restarted | `./bin/refresh-catalog`, `./bin/model-router codex providers`, full Codex restart |
 | Native 429 / "usage limit" while routing | ChatGPT usage window exhausted | expected: the Codex-dry tandem takes over (`jev-router.codex-dry.json`); delete the manual file to re-probe sooner |
 | Jev calls fail with `402 Payment Required` (`gate=codex_dry(fallback)`, `tier` null in the log) | the TypeSafe account is out of credits | expected: the router keeps serving through the tandem; add credits at console.typesafe.ai to restore classification |
-| `Unknown API gateway model: jev-auto` | catalog not republished | `./bin/codex-router refresh-catalog` |
+| `Unknown API gateway model: jev-auto` | catalog not republished | `./bin/refresh-catalog` |
 | Jev returns HTTP 422 | request body missing `"model"` | always send `"model": "jev-latest"` to the System One API |
-| Native calls fail after a few days | shared session expired | re-run `chatgpt-session enable` |
+| Native calls fail after a few days | shared session expired | re-run `./bin/model-router codex chatgpt-session enable` |
 | Service manager rejected inside a supervised agent | environment restriction | use the watchdog; let the user run the OS-specific installer |
 
 ## Latency & cost notes

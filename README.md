@@ -201,105 +201,25 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 
 ## Quickstart
 
-Prerequisites: macOS or Linux, Codex CLI, a **Codex Router** install on the same
-host (checkout with `bin/codex-router`), Python 3.11+, and a TypeSafe API key
-(Jev). Jev relays through the local Codex Router edge; it is not a standalone
-replacement for that router. Windows remains supported by the existing
-Windows-specific launcher/service setup.
+Prerequisites: **Codex App or Codex CLI must already be installed** on the same
+macOS/Linux computer; this project does not install Codex. Also required are
+Git, Node.js 22.19+, `uv` (or Python 3.10+ with `venv`), Python 3.11+ for Jev,
+and a TypeSafe API key. The agent playbook checks these and guides the user
+through installing Codex Router if needed; it never silently installs missing
+system runtimes or takes over an unknown router.
 
-**1. Give the server your TypeSafe key** — either
-`export TYPESAFE_API_KEY=...` in the service environment, or:
+For a guided agent installation, open this repository in Codex and ask it to
+“Follow [AGENTS.md](AGENTS.md) to install Jev Codex Router on this machine.” The
+playbook installs the maintained [Codex Router](https://github.com/duolahypercho/codex-router)
+CLI-only build when needed, connects the local Jev service, validates the
+catalog, and optionally installs a per-user launchd/systemd service. You must
+complete Codex login and explicitly approve sharing its ChatGPT session with
+local router clients. Never paste API keys into chat; configure the TypeSafe
+key in `~/.hermes/.env` or `~/.jev.env`.
 
-```bash
-echo 'TYPESAFE_API_KEY=your-key' >> ~/.hermes/.env   # default env file
-# (override the path with JEV_ENV_FILE=/path/to/env)
-```
-
-**2. Start the server** (foreground test):
-
-```bash
-python3 server/jev_server.py
-curl -s http://127.0.0.1:4319/health
-```
-
-**3. Register with the Codex Router:**
-
-```bash
-cd <codex-router checkout>
-
-# share the native ChatGPT session with local clients (revisit if it expires)
-./bin/codex-router chatgpt-session enable
-
-# declare the generic provider (our local server, native Responses format)
-./bin/codex-router providers generic add jev \
-  --name "Jev Router" --base-url http://127.0.0.1:4319/v1 \
-  --adapter openai-responses --allow-private
-
-# declare the model: ~/.codex/codex-router/user-models.json
-# (this file is local state — router updates won't touch it)
-```
-
-```json
-{
-  "version": 1,
-  "models": [
-    {
-      "slug": "jev/auto",
-      "gatewayModel": "jev-auto",
-      "compHash": "jev-auto-user-v1",
-      "upstreamModel": "auto",
-      "provider": "jev",
-      "listed": true,
-      "displayName": "Jev Codex Router",
-      "description": "Auto-routing by Jev: every turn is classified and served by luna, sol or astra at the thinking depth it needs.",
-      "priority": 95,
-      "defaultEffort": "medium",
-      "reasoningLevels": [
-        { "effort": "low", "description": "Quick reasoning" },
-        { "effort": "medium", "description": "Balanced reasoning" },
-        { "effort": "high", "description": "Deep reasoning" },
-        { "effort": "xhigh", "description": "Extended reasoning" },
-        { "effort": "max", "description": "Maximum reasoning" }
-      ],
-      "contextWindow": 258400,
-      "autoCompact": 219640,
-      "inputModalities": ["text", "image"]
-    }
-  ]
-}
-```
-
-```bash
-# publish the catalog and make the model visible in the picker
-./bin/codex-router refresh-catalog
-./bin/control picker set jev/auto show
-```
-
-**4. Quit and reopen Codex CLI (or desktop)**, then pick **“Jev Codex Router”**
-in the model chooser.
-Check the transport as well as the picker: `jev/auto` must reach the local
-router, not OpenAI's native endpoint. A catalog entry or a
-`[model_providers.jev]` declaration alone does not select that transport.
-See [transport troubleshooting](server/INSTALL.md#model-visible-but-rejected-by-chatgpt)
-if Codex reports that `jev/auto` is unsupported with a ChatGPT account.
-
-**5. Make it permanent** (optional but recommended): install a per-user service
-for your OS. This writes only to your user service manager; no root privileges
-are required on Linux:
-
-```bash
-# macOS
-bash server/install-service.sh
-
-# Linux with systemd --user
-bash server/install-service-linux.sh
-```
-
-Linux hosts without a running systemd user manager can use `server/watchdog.sh`
-from cron (every 5 min). A headless Linux machine may require explicit
-`loginctl enable-linger "$USER"` to keep the user service running after logout.
-Set `CODEX_HOME` the same way for Codex, Codex Router, and Jev when using a
-non-default Codex profile.
+The agent verifies the wiring without making a paid inference request. Then
+fully quit and reopen Codex, create a new task, and select the Jev route. For
+manual operation and troubleshooting see [server/INSTALL.md](server/INSTALL.md).
 
 ## Operations
 
@@ -313,16 +233,16 @@ non-default Codex profile.
 | Kill switch (no Jev → configured off route) | `touch ~/.codex/codex-router/jev-router.off` (delete the file to re-enable) |
 | Force the Codex-dry tandem | `touch ~/.codex/codex-router/jev-router.codex-dry` (delete the file to return to luna/sol/astra) |
 | Inspect the dry auto state | `cat ~/.codex/codex-router/jev-router.codex-dry.json` (reason + expiry; auto-cleared by the next successful native call) |
-| Hide the model | `./bin/control picker set jev/auto hide` |
-| Disable the provider | `./bin/codex-router providers generic disable jev` |
-| Revoke native sharing | `./bin/codex-router chatgpt-session disable` |
+| Disable the Jev provider | `<router>/bin/model-router codex providers disable jev` |
+| Revoke native sharing | `<router>/bin/model-router codex chatgpt-session disable` |
 | Service status | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` |
 
 **After a Codex Router update**, verify nothing was lost:
 
 ```bash
-./bin/codex-router providers generic list        # shows: SHOW jev
-cat ~/.codex/codex-router/model-picker.json      # jev/auto in "visible"
+<router>/bin/model-router codex providers        # Jev should be SHOW and ready
+<router>/bin/model-router codex doctor
+codex debug models                              # Jev route should be listed
 curl -s http://127.0.0.1:4319/health
 ```
 
@@ -334,7 +254,7 @@ curl -s http://127.0.0.1:4319/health
   (otherwise it tries to JSON-parse the stream and fails with
   `invalid_responses_response`).
 - The shared ChatGPT session authorization has a validity window; re-run
-  `chatgpt-session enable` if native routing stops after a while.
+  `<router>/bin/model-router codex chatgpt-session enable` if native routing stops.
 - Code comments are in French for now (author's working language) — PRs welcome.
 
 ## Security
